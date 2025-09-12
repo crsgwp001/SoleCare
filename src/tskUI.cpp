@@ -2,6 +2,7 @@
 #include <ui.h>
 #include <Arduino.h>
 #include "global.h"
+#include <events.h>
 
 DisplayUnit oled1(23, 19, 0);  // SDA, SCL, Wire0
 DisplayUnit oled2(22, 21, 1);  // SDA, SCL, Wire1
@@ -14,12 +15,18 @@ void vMainOledTask(void* pv) {
   Serial.println("OLED1 (Humidity) task started");
 
   while (true) {
-    char msg[64];
+    float h0 = g_dhtHum[0], h1 = g_dhtHum[1], h2 = g_dhtHum[2];
+
+    // 2) Build display message
+    char msg[80];
     snprintf(msg, sizeof(msg),
-             "H1: %.1f%%\nH2: %.1f%%\nH3: %.1f%%",
-             g_dhtHum[0], g_dhtHum[1], g_dhtHum[2]);
+             "H1: %.1f%% \nH2: %.1f%%\nH3: %.1f%%",
+             h0, h1, h2);
+    
     oled1.showMessage(msg);
     vTaskDelay(pdMS_TO_TICKS(2000));
+
+
   }
 }
 

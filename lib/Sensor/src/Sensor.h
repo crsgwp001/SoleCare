@@ -18,3 +18,4 @@ private:
     float lastHum;
 };
 
+float computeAH(float T, float RH);

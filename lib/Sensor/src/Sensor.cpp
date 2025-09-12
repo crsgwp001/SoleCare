@@ -20,3 +20,11 @@ float DHTSensor::readHumidity() {
 bool DHTSensor::isValid() {
     return !isnan(lastTemp) && !isnan(lastHum);
 }
+
+float computeAH(float T, float RH) {
+    float TK   = T + 273.15f;
+    float Psat = 610.78f * expf((17.2694f * T)/(T + 237.3f));
+    float Pv   = (RH / 100.0f) * Psat;
+    return 1000.0f * Pv / (461.5f * TK);
+}
+
