@@ -1,7 +1,12 @@
 #include <Arduino.h>
+#include "global.h"
+#include "tskDHT.h"
+#include "tskUI.h"
 
 void setup() {
-  // put your setup code here, to run once:
+  Serial.begin(115200);
+  createSensorTask();
+  createOledTasks();
 }
 
 void loop() {
