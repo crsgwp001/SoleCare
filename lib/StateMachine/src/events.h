@@ -12,7 +12,12 @@ enum class Event : uint32_t {
   BatteryReady   = 1 << 6,
   ChargeDetected = 1 << 7,
   SensorTimeout  = 1 << 8,
-  SubFSMDone     = 1 << 9
+  SubFSMDone     = 1 << 9,
+  Shoe0InitWet   = 1 << 10,
+  Shoe0InitDry   = 1 << 11,
+  Shoe1InitWet   = 1 << 12,
+  Shoe1InitDry   = 1 << 13
+
 };
 
 // Global FSM states

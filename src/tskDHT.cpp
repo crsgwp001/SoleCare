@@ -46,8 +46,7 @@ static void vSensorTask(void* pvParameters) {
             g_dhtAHDiff[i - 1] = diff;
 
             if      (diff > AH_WET_THRESHOLD)  strcpy(g_dhtStatus[i-1], "wet");
-            else if (diff < AH_DRY_THRESHOLD)  strcpy(g_dhtStatus[i-1], "dry");
-            else                                strcpy(g_dhtStatus[i-1], "normal");
+            else                                 strcpy(g_dhtStatus[i-1], "dry");
         }
 
         // 4) Print in small chunks + yield

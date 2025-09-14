@@ -49,6 +49,6 @@ void vAuxOledTask(void* pv) {
 
 
 void createOledTasks() {
-  xTaskCreatePinnedToCore(vMainOledTask, "OLED1", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(vMainOledTask, "OLED1", 4096, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(vAuxOledTask,  "OLED2", 4096, NULL, 1, NULL, 1);
 }

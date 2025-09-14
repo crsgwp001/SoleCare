@@ -15,5 +15,6 @@ float g_dhtAH_ema[3]       = { NAN, NAN, NAN };
 float g_dhtAHDiff_ema[2]   = { NAN, NAN };
 
 // status strings
-char g_dhtStatus[2][8]     = {"dry", "dry"};
+char g_dhtStatus[2][5]     = {"dry", "dry"};
 
+    

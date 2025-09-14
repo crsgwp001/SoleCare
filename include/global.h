@@ -22,7 +22,7 @@ extern float g_dhtAH_ema[3];
 extern float g_dhtAHDiff_ema[2];
 
 // wet/dry/normal status for sensors 1 and 2
-extern char  g_dhtStatus[2][8];
+extern char  g_dhtStatus[2][5];
 
 #include <type_traits>
 
