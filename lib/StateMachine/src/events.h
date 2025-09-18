@@ -8,6 +8,8 @@ enum class Event : uint32_t {
   Debug          = 1 << 2,
   ResetPressed   = 1 << 3,
   StartPressed   = 1 << 4,
+  // Internal event used to auto-start sub-FSMs (distinct from the physical Start button)
+  SubStart       = 1 << 5,
   BatteryLow     = 1 << 5,
   BatteryReady   = 1 << 6,
   ChargeDetected = 1 << 7,

@@ -1,6 +1,7 @@
 // tskDHT.cpp
 #include "tskDHT.h"
 #include "global.h"
+#include "dev_debug.h"
 #include <Sensor.h>
 #include <cstring>     // strcpy()
 
@@ -50,20 +51,20 @@ static void vSensorTask(void* pvParameters) {
         }
 
         // 4) Print in small chunks + yield
-        Serial.print("S0: "); Serial.print(g_dhtTemp[0], 1); Serial.print("C ");
-        Serial.print(g_dhtHum[0], 1); Serial.print("% AH: "); Serial.println(g_dhtAH_ema[0], 2);
+        DEV_DBG_PRINT("S0: "); DEV_DBG_PRINT(g_dhtTemp[0], 1); DEV_DBG_PRINT("C ");
+        DEV_DBG_PRINT(g_dhtHum[0], 1); DEV_DBG_PRINT("% AH: "); DEV_DBG_PRINTLN(g_dhtAH_ema[0], 2);
         taskYIELD();
 
-        Serial.print("S1: "); Serial.print(g_dhtTemp[1], 1); Serial.print("C ");
-        Serial.print(g_dhtHum[1], 1); Serial.print("% AH: "); Serial.print(g_dhtAH_ema[1], 2);
-        Serial.print(" Δ: "); Serial.print(g_dhtAHDiff[0], 2); Serial.print(" "); 
-        Serial.println(g_dhtStatus[0]);
+        DEV_DBG_PRINT("S1: "); DEV_DBG_PRINT(g_dhtTemp[1], 1); DEV_DBG_PRINT("C ");
+        DEV_DBG_PRINT(g_dhtHum[1], 1); DEV_DBG_PRINT("% AH: "); DEV_DBG_PRINT(g_dhtAH_ema[1], 2);
+        DEV_DBG_PRINT(" Δ: "); DEV_DBG_PRINT(g_dhtAHDiff[0], 2); DEV_DBG_PRINT(" "); 
+        DEV_DBG_PRINTLN(g_dhtStatus[0]);
         taskYIELD();
 
-        Serial.print("S2: "); Serial.print(g_dhtTemp[2], 1); Serial.print("C ");
-        Serial.print(g_dhtHum[2], 1); Serial.print("% AH: "); Serial.print(g_dhtAH_ema[2], 2);
-        Serial.print(" Δ: "); Serial.print(g_dhtAHDiff[1], 2); Serial.print(" "); 
-        Serial.println(g_dhtStatus[1]);
+        DEV_DBG_PRINT("S2: "); DEV_DBG_PRINT(g_dhtTemp[2], 1); DEV_DBG_PRINT("C ");
+        DEV_DBG_PRINT(g_dhtHum[2], 1); DEV_DBG_PRINT("% AH: "); DEV_DBG_PRINT(g_dhtAH_ema[2], 2);
+        DEV_DBG_PRINT(" Δ: "); DEV_DBG_PRINT(g_dhtAHDiff[1], 2); DEV_DBG_PRINT(" "); 
+        DEV_DBG_PRINTLN(g_dhtStatus[1]);
         taskYIELD();
 
         // 5) Delay to free CPU & reset task watchdog

@@ -16,6 +16,7 @@ bool DisplayUnit::begin() {
 
     display.clearDisplay();
     display.display();
+    return true;
 }
 
 void DisplayUnit::showMessage(const String& msg) {

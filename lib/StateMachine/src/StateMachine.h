@@ -2,6 +2,7 @@
 #include <functional>
 #include <vector>
 #include <map>
+#include "fsm_debug.h"
 
 // Alias for any callback with no args
 using ActionFn = std::function<void()>;
@@ -31,8 +32,8 @@ public:
     void setEntry(StateT s, ActionFn fn) { _entryMap[s] = fn; }
     void setExit (StateT s, ActionFn fn) { _exitMap[s]  = fn; }
 
-    // Handle an incoming event
-    void handleEvent(EventT ev) {
+    // Handle an incoming event. Returns true if a transition fired.
+    bool handleEvent(EventT ev) {
         for (auto& t : _transitions) {
             if (t.from == _current && t.event == ev) {
                 auto exitFn  = _exitMap[_current];
@@ -43,9 +44,11 @@ public:
 
                 _current = t.to;
                 if (entryFn) entryFn();
-                break;
+                                FSM_DBG_PRINTLN("StateMachine: event consumed");
+                return true;
             }
         }
+        return false;
     }
 
     // Run the “active” logic for the current state
