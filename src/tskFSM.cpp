@@ -4,6 +4,7 @@
 #include <Events.h>
 #include "global.h"
 #include "fsm_debug.h"
+#include "tskUV.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -64,6 +65,11 @@ static bool fsmPostEvent(Event ev, bool broadcastAll = false) {
   EventMsg m{ev, broadcastAll};
   return xQueueSend(g_fsmEventQ, &m, 0) == pdTRUE;
 }
+
+  // Allow external tasks to post events to the FSM queue
+  bool fsmExternalPost(Event ev) {
+    return fsmPostEvent(ev, /*broadcastAll=*/false);
+  }
 
 //------------------------------------------------------------------------------
 // 50 ms software debounce helpers
@@ -145,14 +151,14 @@ static void setupStateMachines() {
   // Make ResetPressed a catch-all: any Global state -> Idle
   for (uint8_t s = 0; s < static_cast<uint8_t>(GlobalState::Count); ++s) {
     GlobalState st = static_cast<GlobalState>(s);
-  fsmGlobal.addTransition({ st, Event::ResetPressed, GlobalState::Idle, [](){ FSM_DBG_PRINTLN("GLOBAL: Reset (catch-all)"); } });
+  fsmGlobal.addTransition({ st, Event::ResetPressed, GlobalState::Idle, [](){ FSM_DBG_PRINTLN("GLOBAL: Reset (Idle)"); } });
   }
 
   // Make ResetPressed catch-all for subs -> S_IDLE
   for (int s = 0; s <= static_cast<int>(SubState::S_DONE); ++s) {
     SubState st = static_cast<SubState>(s);
-  fsmSub1.addTransition({ st, Event::ResetPressed, SubState::S_IDLE, [](){ FSM_DBG_PRINTLN("SUB1: Reset (catch-all)"); g_subDoneMask &= ~1u; } });
-  fsmSub2.addTransition({ st, Event::ResetPressed, SubState::S_IDLE, [](){ FSM_DBG_PRINTLN("SUB2: Reset (catch-all)"); g_subDoneMask &= ~2u; } });
+  fsmSub1.addTransition({ st, Event::ResetPressed, SubState::S_IDLE, [](){ FSM_DBG_PRINTLN("SUB1: Reset (S_Idle)"); g_subDoneMask &= ~1u; } });
+  fsmSub2.addTransition({ st, Event::ResetPressed, SubState::S_IDLE, [](){ FSM_DBG_PRINTLN("SUB2: Reset (S_Idle)"); g_subDoneMask &= ~2u; } });
   }
 
   // Run callback for Running: poll subs
@@ -174,11 +180,40 @@ static void setupStateMachines() {
   });
 
   // Sub entries/exits
-  fsmSub1.setEntry(SubState::S_WET, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: WET -> start monitoring"); });
-  fsmSub1.setExit (SubState::S_WET, [](){ FSM_DBG_PRINTLN("SUB1 EXIT: leaving WET"); });
-  fsmSub1.setEntry(SubState::S_DRY, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> stop fan"); });
-  fsmSub2.setEntry(SubState::S_WET, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: WET"); });
-  fsmSub2.setEntry(SubState::S_DRY, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: DRY"); });
+  // Register state entry/exit callbacks via compact tables
+  struct StateCBG { GlobalState s; void(*entry)(); void(*exit)(); };
+  struct StateCBS { SubState s; void(*entry)(); void(*exit)(); };
+
+  static StateCBG global_cbs[] = {
+    { GlobalState::Running, [](){ bool s1Wet = (strcmp(g_dhtStatus[0],"wet") == 0); bool s2Wet = (strcmp(g_dhtStatus[1],"wet") == 0); FSM_DBG_PRINTLN("GLOBAL ENTRY: Running - initializing subs"); fsmPostEvent(s1Wet ? Event::Shoe0InitWet : Event::Shoe0InitDry, false); fsmPostEvent(s2Wet ? Event::Shoe1InitWet : Event::Shoe1InitDry, false); }, nullptr },
+    { GlobalState::Detecting, [](){ detectingStartMs = millis(); FSM_DBG_PRINTLN("GLOBAL ENTRY: Detecting - equalize timer started"); }, [](){ detectingStartMs = 0; FSM_DBG_PRINTLN("GLOBAL EXIT: Detecting - equalize timer cleared"); } },
+    { GlobalState::Done, [](){ FSM_DBG_PRINTLN("GLOBAL ENTRY: Done - resetting subs (local)"); fsmSub1.handleEvent(Event::ResetPressed); fsmSub2.handleEvent(Event::ResetPressed); uvStop(0); uvStop(1); g_subDoneMask = 0; }, nullptr }
+  };
+
+  static StateCBS sub1_cbs[] = {
+    { SubState::S_WET, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: WET"); }, [](){ FSM_DBG_PRINTLN("SUB1 EXIT: leaving WET"); } },
+    { SubState::S_COOLING, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING"); uvStart(0, 0); }, nullptr },
+    { SubState::S_DRY, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: DRY"); if (!uvIsStarted(0)) uvStart(0, 0); }, nullptr }
+  };
+
+  static StateCBS sub2_cbs[] = {
+    { SubState::S_WET, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: WET"); }, nullptr },
+    { SubState::S_COOLING, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING"); uvStart(1, 0); }, nullptr },
+    { SubState::S_DRY, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: DRY"); if (!uvIsStarted(1)) uvStart(1, 0); }, nullptr }
+  };
+
+  for (auto &c : global_cbs) {
+    if (c.entry) fsmGlobal.setEntry(c.s, c.entry);
+    if (c.exit)  fsmGlobal.setExit(c.s, c.exit);
+  }
+  for (auto &c : sub1_cbs) {
+    if (c.entry) fsmSub1.setEntry(c.s, c.entry);
+    if (c.exit)  fsmSub1.setExit(c.s, c.exit);
+  }
+  for (auto &c : sub2_cbs) {
+    if (c.entry) fsmSub2.setEntry(c.s, c.entry);
+    if (c.exit)  fsmSub2.setExit(c.s, c.exit);
+  }
 
   // Detecting entry/exit
   fsmGlobal.setEntry(GlobalState::Detecting, [](){ detectingStartMs = millis(); FSM_DBG_PRINTLN("GLOBAL ENTRY: Detecting - equalize timer started"); });
@@ -191,6 +226,9 @@ static void setupStateMachines() {
     fsmSub1.handleEvent(Event::ResetPressed);
     fsmSub2.handleEvent(Event::ResetPressed);
     // clear completion mask
+    // ensure UVs are stopped
+    uvStop(0);
+    uvStop(1);
     g_subDoneMask = 0;
   });
 }
@@ -205,6 +243,8 @@ static void vStateMachineTask(void* pvParameters) {
   if (!g_fsmEventQ) {
     g_fsmEventQ = xQueueCreate(FSM_QUEUE_LEN, sizeof(EventMsg));
   }
+  // Initialize UV task/queue
+  uvInit();
   setupStateMachines();
   FSM_DBG_PRINTLN("FSM Task started");
 
@@ -267,10 +307,29 @@ static void vStateMachineTask(void* pvParameters) {
                 fsmSub2.handleEvent(m.ev);
                 break;
               case Event::SubStart:
-                // advance both subs
-                fsmSub1.handleEvent(m.ev);
-                fsmSub2.handleEvent(m.ev);
+                // advance both subs, but block advancement from S_DRY if UV timer still running
+                if (!(fsmSub1.getState() == SubState::S_DRY && !uvTimerFinished(0))) {
+                  fsmSub1.handleEvent(m.ev);
+                } else {
+                  FSM_DBG_PRINTLN("SUB1: SubStart ignored - UV timer running");
+                }
+                if (!(fsmSub2.getState() == SubState::S_DRY && !uvTimerFinished(1))) {
+                  fsmSub2.handleEvent(m.ev);
+                } else {
+                  FSM_DBG_PRINTLN("SUB2: SubStart ignored - UV timer running");
+                }
                 break;
+                case Event::UVTimer0:
+                  // When UV 0 completes, only advance if sub1 is in DRY (not while in COOLING)
+                  if (fsmSub1.getState() == SubState::S_DRY) {
+                    fsmSub1.handleEvent(Event::SubStart);
+                  }
+                  break;
+                case Event::UVTimer1:
+                  if (fsmSub2.getState() == SubState::S_DRY) {
+                    fsmSub2.handleEvent(Event::SubStart);
+                  }
+                  break;
               case Event::SubFSMDone:
                 // Only forward completion to Global when both subs reached S_DONE
                 if (fsmSub1.getState() == SubState::S_DONE && fsmSub2.getState() == SubState::S_DONE) {
