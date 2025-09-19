@@ -9,7 +9,7 @@ public:
     void begin();
     float readTemperature();
     float readHumidity();
-    bool isValid();  // Optional: check for NaN or fault
+    bool isValid(); // Optional: check for NaN or fault
 
 private:
     DHT dht;
