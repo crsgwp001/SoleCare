@@ -1,7 +1,43 @@
 #pragma once
+#include <cstdint>
 
+// Absolute-humidity thresholds (g/m^3) used to classify wet/dry
 constexpr float AH_WET_THRESHOLD = 1.0f;
 constexpr float AH_DRY_THRESHOLD = -1.0f;
-constexpr float EMA_ALPHA       = 0.2f;
 
-#define ambAHoffset     0.0f  // Adjust ambient AH reading here
+// Exponential moving average smoothing factor (0..1). Larger = faster response.
+constexpr float EMA_ALPHA = 0.2f;
+
+// Ambient absolute-humidity offset applied only to sensor 0. Use a constexpr
+// so the value participates in compile-time expressions and has proper type.
+constexpr float AMB_AH_OFFSET = 0.0f; // adjust ambient AH reading here
+
+// How long (ms) to remain in GLOBAL Done state before automatically
+// resetting back to Idle. Default 10 seconds — adjust if you want a
+// different auto-reset interval.
+constexpr uint32_t DONE_TIMEOUT_MS = 10u * 1000u; // 10s
+
+// --------------------- Hardware configuration ---------------------
+// Place hardware-pin and polarity choices here so they are easy to
+// change for different boards without touching source files.
+
+// UV relay pins (two channels)
+constexpr int HW_UV_PIN_0 = 18; // UV relay for channel 0
+constexpr int HW_UV_PIN_1 = 5;  // UV relay for channel 1
+
+// Set true if relay module is active-low (drive LOW to enable relay)
+constexpr bool HW_RELAY_ACTIVE_LOW = false;
+
+// Default UV on-duration (ms) when caller passes 0
+constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u; // 10s
+
+// DHT sensor GPIO pins (sensor0, sensor1, sensor2)
+constexpr int HW_DHT_PIN_0 = 17;
+constexpr int HW_DHT_PIN_1 = 16;
+constexpr int HW_DHT_PIN_2 = 4;
+
+// Push-button pins
+constexpr int HW_START_PIN = 35;
+constexpr int HW_RESET_PIN = 34;
+
+// ------------------------------------------------------------------

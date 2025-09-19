@@ -21,7 +21,6 @@ enum class Event : uint32_t {
   Shoe1InitDry   = 1 << 13,
   UVTimer0       = 1 << 14,
   UVTimer1       = 1 << 15
-
 };
 
 // Global FSM states
