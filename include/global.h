@@ -1,10 +1,14 @@
 // global.h — shared global symbols
 #pragma once
 
+// Includes
 #include "config.h"
 #include <Arduino.h>
 #include <cmath>
 #include <type_traits>
+
+// Ambient AH offset alias (from config)
+static constexpr float kAmbAhOffset = AMB_AH_OFFSET;
 
 // Raw temperature and humidity readings (indexed by sensor)
 extern float g_dhtTemp[3];
@@ -22,9 +26,6 @@ extern float g_dhtAHDiff_ema[2];
 
 // Boolean wet/dry status for sensors 1 and 2 (true = wet)
 extern bool g_dhtIsWet[2];
-
-// Ambient AH offset alias (from config)
-static constexpr float kAmbAhOffset = AMB_AH_OFFSET;
 
 // Enum bit helpers: enable bitwise ops for enum types. These are small helpers
 // and only enabled for enum types via SFINAE.

@@ -1,8 +1,10 @@
 // Lightweight developer debug helper. Define DEV_DEBUG to enable prints.
 #pragma once
 
+// System includes
 #ifdef DEV_DEBUG
 #include <Arduino.h>
+
 // Serial may not be ready in early init; check Serial.availableForWrite as a
 // lightweight readiness indicator before printing. Use do/while(0) to make
 // these macros statement-safe.
