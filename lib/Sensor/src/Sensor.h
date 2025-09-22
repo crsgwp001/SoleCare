@@ -1,5 +1,6 @@
 #pragma once
 
+// system includes
 #include <Arduino.h>
 #include <DHT.h>
 
@@ -18,4 +19,5 @@ private:
   float lastHum;
 };
 
+// Helper: compute absolute humidity (g/m^3)
 float computeAH(float T, float RH);
