@@ -1,7 +1,7 @@
 // UV relay control API
 #pragma once
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 bool uvInit();
 bool uvStart(uint8_t idx, uint32_t durationMs);
