@@ -1,7 +1,7 @@
 // tskMotor.cpp - Motor and heater control task
 #include "tskMotor.h"
-#include "dev_debug.h"
 #include "global.h"
+#include "dev_debug.h"
 #include "tskFSM.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>

@@ -1,7 +1,7 @@
 // tskDHT.cpp
 #include "tskDHT.h"
-#include "dev_debug.h"
 #include "global.h"
+#include "dev_debug.h"
 #include <Sensor.h>
 #include <cstring> // strcpy()
 

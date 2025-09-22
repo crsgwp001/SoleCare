@@ -1,6 +1,6 @@
 #include "tskFSM.h"
-#include "fsm_debug.h"
 #include "global.h"
+#include "fsm_debug.h"
 #include "tskMotor.h"
 #include "tskUV.h"
 #include <Arduino.h>

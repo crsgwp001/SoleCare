@@ -1,7 +1,7 @@
 // tskUV.cpp - UV task implementation
 #include "tskUV.h"
-#include "config.h"
 #include "tskFSM.h"
+#include "config.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
