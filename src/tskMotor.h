@@ -1,7 +1,7 @@
 // Motor/heater control task API
 #pragma once
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 bool motorInit();
 // Start control for shoe index (0 or 1). The task will monitor sensors and

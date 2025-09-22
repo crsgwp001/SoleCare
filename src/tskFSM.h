@@ -10,4 +10,3 @@ bool fsmExternalPost(Event ev);
 GlobalState getGlobalState();
 SubState getSub1State();
 SubState getSub2State();
-

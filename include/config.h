@@ -32,11 +32,12 @@ constexpr bool HW_RELAY_ACTIVE_LOW = false;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u; // 10s (set to 10 seconds per request)
 
 // Timeouts (ms) used by FSM and motor task; make these tunable
-constexpr uint32_t WET_TIMEOUT_MS        = 5u * 1000u;   // safety timeout while in WET
+constexpr uint32_t WET_TIMEOUT_MS = 5u * 1000u; // safety timeout while in WET
 // DRYER_RUNTIME_MS is legacy; cooling duration used is DRY_COOL_MS below
-constexpr uint32_t DRYER_RUNTIME_MS      = 20u * 1000u;  // legacy; not used
-constexpr uint32_t DRY_COOL_MS           = 5u * 1000u;   // cooling period (5s)
-constexpr uint32_t MOTOR_SAFETY_MS       = 120u * 1000u;  // increased safety window to 120s for WET+COOLING
+constexpr uint32_t DRYER_RUNTIME_MS = 20u * 1000u; // legacy; not used
+constexpr uint32_t DRY_COOL_MS = 5u * 1000u;       // cooling period (5s)
+constexpr uint32_t MOTOR_SAFETY_MS =
+    120u * 1000u; // increased safety window to 120s for WET+COOLING
 
 // DHT sensor GPIO pins (sensor0, sensor1, sensor2)
 constexpr int HW_DHT_PIN_0 = 17;
