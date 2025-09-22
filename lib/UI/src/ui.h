@@ -1,7 +1,7 @@
 #pragma once
 
-#include <Adafruit_ssd1306.h>
 #include <Wire.h>
+#include <Adafruit_ssd1306.h>
 
 class DisplayUnit {
 public:

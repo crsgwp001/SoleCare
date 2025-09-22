@@ -1,6 +1,7 @@
 // system includes
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <Arduino.h>
 
 // project includes
 #include "ui.h"
