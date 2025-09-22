@@ -14,8 +14,8 @@ float g_dhtAHDiff[2] = {0};
 float g_dhtAH_ema[3]     = { NAN, NAN, NAN };
 float g_dhtAHDiff_ema[2] = { NAN, NAN };
 
-// status strings
-char g_dhtStatus[2][5] = { "dry", "dry" };
+// boolean status: true == wet
+bool g_dhtIsWet[2] = { false, false };
 
 
     

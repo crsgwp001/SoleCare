@@ -5,6 +5,7 @@
 #include "global.h"
 #include "fsm_debug.h"
 #include "tskUV.h"
+#include "tskMotor.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -37,6 +38,17 @@ static bool fsmPostEvent(Event ev, bool broadcastAll);
 static uint8_t g_subDoneMask = 0;
 // timestamp when we entered Done (0 = not active). After 60s -> auto-reset
 static uint32_t g_doneStartMs = 0;
+// per-sub timestamps for managing time-based transitions
+static uint32_t g_subWetStartMs[2] = {0,0};
+// g_subDryerStartMs removed; use g_subWetStartMs for wet runtime and g_subCoolingStartMs for cooling
+static uint32_t g_subCoolingStartMs[2] = {0,0};
+// Track whether the UV timer expired while the sub was in the COOLING phase.
+static bool g_uvExpiredDuringCooling[2] = { false, false };
+// UV complete flag: set when a UV timer has finished for a sub. Prevents
+// restarting the UV timer on subsequent loops between cooling->wet.
+static bool g_uvComplete[2] = { false, false };
+// Protect g_uvComplete access since it's read from UI (core 0) and written by FSM (core 1)
+// (g_uvComplete is internal to FSM)
 
 static void markSubDone(int idx) {
   if (idx == 0) g_subDoneMask |= 1u;
@@ -96,20 +108,24 @@ static void setupStateMachines() {
   };
 
   Transition<SubState, Event> sub1_trans[] = {
-    { SubState::S_IDLE,    Event::Shoe0InitWet, SubState::S_WET,     [](){ FSM_DBG_PRINTLN("SUB1: entered S_WET"); } },
-    { SubState::S_IDLE,    Event::Shoe0InitDry, SubState::S_DRY,     [](){ FSM_DBG_PRINTLN("SUB1: entered S_DRY"); } },
-    { SubState::S_WET,     Event::SubStart,     SubState::S_COOLING, [](){ FSM_DBG_PRINTLN("SUB1: Wet→Cooling (SubStart)"); } },
-    { SubState::S_COOLING, Event::SubStart,     SubState::S_DRY,     [](){ FSM_DBG_PRINTLN("SUB1: Cooling→Dry (SubStart)"); } },
-    { SubState::S_DRY,     Event::SubStart,     SubState::S_DONE,    [](){ FSM_DBG_PRINTLN("SUB1: Dry→Done (SubStart)"); markSubDone(0); } },
+    { SubState::S_IDLE,     Event::Shoe0InitWet,   SubState::S_WET,      [](){ FSM_DBG_PRINTLN("SUB1: entered S_WET"); } },
+    { SubState::S_IDLE,     Event::Shoe0InitDry,   SubState::S_DRY,      [](){ FSM_DBG_PRINTLN("SUB1: entered S_DRY"); } },
+    // New flow: S_WET -> S_COOLING (heater off, motor continues) -> S_DRY
+    { SubState::S_WET,      Event::SubStart,       SubState::S_COOLING,  [](){ FSM_DBG_PRINTLN("SUB1: Wet→Cooling (SubStart)"); } },
+    { SubState::S_COOLING,  Event::SubStart,       SubState::S_DRY,      [](){ FSM_DBG_PRINTLN("SUB1: Cooling→Dry (SubStart)"); } },
+    { SubState::S_DRY,      Event::SubStart,       SubState::S_DONE,     [](){ FSM_DBG_PRINTLN("SUB1: Dry→Done (SubStart)"); markSubDone(0); } },
+    // If dry-check fails, return to S_WET to run dryer again
+    { SubState::S_DRY,      Event::DryCheckFailed, SubState::S_WET,      [](){ FSM_DBG_PRINTLN("SUB1: Dry->Wet (DryCheckFailed)"); } },
   };
 
   Transition<SubState, Event> sub2_trans[] = {
-    { SubState::S_IDLE,    Event::Shoe1InitWet, SubState::S_WET,     [](){ FSM_DBG_PRINTLN("SUB2: entered S_WET"); } },
-    { SubState::S_IDLE,    Event::Shoe1InitDry, SubState::S_DRY,     [](){ FSM_DBG_PRINTLN("SUB2: entered S_DRY"); } },
-    { SubState::S_WET,     Event::SubStart,     SubState::S_COOLING, [](){ FSM_DBG_PRINTLN("SUB2: Wet→Cooling (SubStart)"); } },
-    { SubState::S_COOLING, Event::SubStart,     SubState::S_DRY,     [](){ FSM_DBG_PRINTLN("SUB2: Cooling→Dry (SubStart)"); } },
-    { SubState::S_DRY,     Event::SubStart,     SubState::S_DONE,    [](){ FSM_DBG_PRINTLN("SUB2: Dry→Done (SubStart)"); markSubDone(1); } },
-    { SubState::S_DONE,    Event::SubStart,     SubState::S_DONE,    [](){ /* end */ } }
+    { SubState::S_IDLE,     Event::Shoe1InitWet,   SubState::S_WET,      [](){ FSM_DBG_PRINTLN("SUB2: entered S_WET"); } },
+    { SubState::S_IDLE,     Event::Shoe1InitDry,   SubState::S_DRY,      [](){ FSM_DBG_PRINTLN("SUB2: entered S_DRY"); } },
+    { SubState::S_WET,      Event::SubStart,       SubState::S_COOLING,  [](){ FSM_DBG_PRINTLN("SUB2: Wet→Cooling (SubStart)"); } },
+    { SubState::S_COOLING,  Event::SubStart,       SubState::S_DRY,      [](){ FSM_DBG_PRINTLN("SUB2: Cooling→Dry (SubStart)"); } },
+    { SubState::S_DRY,      Event::SubStart,       SubState::S_DONE,     [](){ FSM_DBG_PRINTLN("SUB2: Dry→Done (SubStart)"); markSubDone(1); } },
+    { SubState::S_DRY,      Event::DryCheckFailed, SubState::S_WET,      [](){ FSM_DBG_PRINTLN("SUB2: Dry->Wet (DryCheckFailed)"); } },
+    { SubState::S_DONE,     Event::SubStart,       SubState::S_DONE,     [](){ /* end */ } }
   };
 
   // Register transitions
@@ -132,8 +148,9 @@ static void setupStateMachines() {
 
   // Running entry: initialize subs (post init events; do not auto-kick SubStart)
   fsmGlobal.setEntry(GlobalState::Running, [](){
-    bool s1Wet = (strcmp(g_dhtStatus[0], "wet") == 0);
-    bool s2Wet = (strcmp(g_dhtStatus[1], "wet") == 0);
+  // use boolean wet flags populated by tskDHT
+  bool s1Wet = g_dhtIsWet[0];
+  bool s2Wet = g_dhtIsWet[1];
     FSM_DBG_PRINTLN("GLOBAL ENTRY: Running - initializing subs");
     fsmPostEvent(s1Wet ? Event::Shoe0InitWet : Event::Shoe0InitDry, false);
     fsmPostEvent(s2Wet ? Event::Shoe1InitWet : Event::Shoe1InitDry, false);
@@ -144,26 +161,142 @@ static void setupStateMachines() {
   struct StateCBS { SubState s; void(*entry)(); void(*exit)(); };
 
   static StateCBG global_cbs[] = {
-    { GlobalState::Running, [](){ bool s1Wet = (strcmp(g_dhtStatus[0],"wet") == 0); bool s2Wet = (strcmp(g_dhtStatus[1],"wet") == 0); FSM_DBG_PRINTLN("GLOBAL ENTRY: Running - initializing subs"); fsmPostEvent(s1Wet ? Event::Shoe0InitWet : Event::Shoe0InitDry, false); fsmPostEvent(s2Wet ? Event::Shoe1InitWet : Event::Shoe1InitDry, false); }, nullptr },
+  { GlobalState::Running, [](){ bool s1Wet = g_dhtIsWet[0]; bool s2Wet = g_dhtIsWet[1]; FSM_DBG_PRINTLN("GLOBAL ENTRY: Running - initializing subs"); g_uvComplete[0] = g_uvComplete[1] = false; fsmPostEvent(s1Wet ? Event::Shoe0InitWet : Event::Shoe0InitDry, false); fsmPostEvent(s2Wet ? Event::Shoe1InitWet : Event::Shoe1InitDry, false); }, nullptr },
     { GlobalState::Detecting, [](){ detectingStartMs = millis(); FSM_DBG_PRINTLN("GLOBAL ENTRY: Detecting - equalize timer started"); }, [](){ detectingStartMs = 0; FSM_DBG_PRINTLN("GLOBAL EXIT: Detecting - equalize timer cleared"); } },
-    { GlobalState::Done, [](){ FSM_DBG_PRINTLN("GLOBAL ENTRY: Done - resetting subs (local)"); fsmSub1.handleEvent(Event::ResetPressed); fsmSub2.handleEvent(Event::ResetPressed); uvStop(0); uvStop(1); g_subDoneMask = 0; g_doneStartMs = millis(); }, [](){ g_doneStartMs = 0; } }
+  { GlobalState::Done, [](){ FSM_DBG_PRINTLN("GLOBAL ENTRY: Done - resetting subs (local)"); fsmSub1.handleEvent(Event::ResetPressed); fsmSub2.handleEvent(Event::ResetPressed); uvStop(0); uvStop(1); g_subDoneMask = 0; g_uvComplete[0] = g_uvComplete[1] = false; g_doneStartMs = millis(); }, [](){ g_doneStartMs = 0; } }
   };
 
   static StateCBS sub1_cbs[] = {
-    { SubState::S_WET, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: WET"); }, [](){ FSM_DBG_PRINTLN("SUB1 EXIT: leaving WET"); } },
-    { SubState::S_COOLING, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING"); uvStart(0, 0); }, nullptr },
-    { SubState::S_DRY, [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: DRY"); if (!uvIsStarted(0)) uvStart(0, 0); }, nullptr }
+    // S_WET: start motor + heater and run for WET_TIMEOUT_MS then transition to COOLING
+    { SubState::S_WET,
+      [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: WET"); motorStart(0); /* heater on during wet */ heaterRun(0, true); g_subWetStartMs[0] = millis(); },
+      [](){ FSM_DBG_PRINTLN("SUB1 EXIT: leaving WET"); /* leaving wet */ } },
+    // S_COOLING: heater off, motor continues; start cooling timer
+    { SubState::S_COOLING,
+      [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING"); /* turn heater off, motor kept running */ heaterRun(0, false);
+        // On cooling entry ensure UV is running for the cooling period: if it
+        // was paused resume it; if it wasn't started, start it. Clear any
+        // previous 'expired during cooling' marker.
+        g_uvExpiredDuringCooling[0] = false;
+        if (!g_uvComplete[0]) {
+          if (uvIsPaused(0)) { FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING -> resuming UV"); uvResume(0); }
+          else if (!uvIsStarted(0)) { FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING -> starting UV"); uvStart(0, 0); }
+        } else {
+          FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING -> UV already complete, not starting");
+        }
+        g_subCoolingStartMs[0] = millis(); },
+      [](){ FSM_DBG_PRINTLN("SUB1 EXIT: leaving COOLING"); /* leaving cooling */ } },
+    // S_DRY: on entry stop motor; if UV already expired (timer fired during cooling)
+    // then the sub will be advanced by the UVTimer event. If starting from DRY, start
+    // UV here only after an immediate dry-check (to avoid skipping the UV duration).
+    { SubState::S_DRY,
+      [](){ FSM_DBG_PRINTLN("SUB1 ENTRY: DRY"); motorStop(0);
+        // If UV expired while in COOLING, we should advance immediately.
+        if (g_uvExpiredDuringCooling[0]) {
+          FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> UV already expired during COOLING, advancing");
+          g_uvExpiredDuringCooling[0] = false;
+          fsmSub1.handleEvent(Event::SubStart);
+          return;
+        }
+        // If sensor reads wet now, go back to WET.
+        if (g_dhtIsWet[0]) {
+          FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> sensor wet, returning to WET");
+          // Ensure UV is not running while we go back to wet
+          uvPause(0);
+          fsmSub1.handleEvent(Event::DryCheckFailed);
+          return;
+        }
+        // Otherwise ensure UV is running (start or resume) and wait for UVTimer to advance
+        if (!g_uvComplete[0]) {
+          if (uvIsPaused(0)) { FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> resuming UV"); uvResume(0); }
+          else if (!uvIsStarted(0)) { FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> starting UV"); uvStart(0, 0); }
+        } else {
+          FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> UV already complete, advancing");
+          fsmSub1.handleEvent(Event::SubStart);
+        }
+      },
+      nullptr }
   };
 
   static StateCBS sub2_cbs[] = {
-    { SubState::S_WET, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: WET"); }, nullptr },
-    { SubState::S_COOLING, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING"); uvStart(1, 0); }, nullptr },
-    { SubState::S_DRY, [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: DRY"); if (!uvIsStarted(1)) uvStart(1, 0); }, nullptr }
+    { SubState::S_WET,
+      [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: WET"); motorStart(1); /* heater on during wet */ heaterRun(1, true); g_subWetStartMs[1] = millis(); },
+      [](){ FSM_DBG_PRINTLN("SUB2 EXIT: leaving WET"); } },
+    { SubState::S_COOLING,
+      [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING"); heaterRun(1, false);
+        g_uvExpiredDuringCooling[1] = false;
+        if (!g_uvComplete[1]) {
+          if (uvIsPaused(1)) { FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING -> resuming UV"); uvResume(1); }
+          else if (!uvIsStarted(1)) { FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING -> starting UV"); uvStart(1, 0); }
+        } else {
+          FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING -> UV already complete, not starting");
+        }
+        g_subCoolingStartMs[1] = millis(); },
+      [](){ FSM_DBG_PRINTLN("SUB2 EXIT: leaving COOLING"); } },
+    { SubState::S_DRY,
+      [](){ FSM_DBG_PRINTLN("SUB2 ENTRY: DRY"); motorStop(1);
+        // If UV expired while in COOLING, advance immediately.
+        if (g_uvExpiredDuringCooling[1]) {
+          FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> UV already expired during COOLING, advancing");
+          g_uvExpiredDuringCooling[1] = false;
+          fsmSub2.handleEvent(Event::SubStart);
+          return;
+        }
+        // If sensor reads wet now, go back to WET.
+        if (g_dhtIsWet[1]) {
+          FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> sensor wet, returning to WET");
+          uvPause(1);
+          fsmSub2.handleEvent(Event::DryCheckFailed);
+          return;
+        }
+        // Otherwise ensure UV is running (start or resume) and wait for UVTimer.
+        if (!g_uvComplete[1]) {
+          if (uvIsPaused(1)) { FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> resuming UV"); uvResume(1); }
+          else if (!uvIsStarted(1)) { FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> starting UV"); uvStart(1, 0); }
+        } else {
+          FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> UV already complete, advancing");
+          fsmSub2.handleEvent(Event::SubStart);
+        }
+      },
+      nullptr }
   };
 
   for (auto &c : global_cbs) { if (c.entry) fsmGlobal.setEntry(c.s, c.entry); if (c.exit) fsmGlobal.setExit(c.s, c.exit); }
   for (auto &c : sub1_cbs)   { if (c.entry) fsmSub1.setEntry(c.s, c.entry); if (c.exit)  fsmSub1.setExit(c.s, c.exit); }
   for (auto &c : sub2_cbs)   { if (c.entry) fsmSub2.setEntry(c.s, c.entry); if (c.exit)  fsmSub2.setExit(c.s, c.exit); }
+
+  // Per-state run callbacks to handle time-based progression and checks
+  // S_WET run: run wet period (heater+motor) for WET_TIMEOUT_MS -> advance to COOLING
+  fsmSub1.setRun(SubState::S_WET, [](){ if (g_subWetStartMs[0] != 0 && (uint32_t)(millis() - g_subWetStartMs[0]) >= WET_TIMEOUT_MS) { FSM_DBG_PRINTLN("SUB1: WET timeout -> advance to COOLING"); g_subWetStartMs[0] = 0; fsmSub1.handleEvent(Event::SubStart); } });
+  fsmSub2.setRun(SubState::S_WET, [](){ if (g_subWetStartMs[1] != 0 && (uint32_t)(millis() - g_subWetStartMs[1]) >= WET_TIMEOUT_MS) { FSM_DBG_PRINTLN("SUB2: WET timeout -> advance to COOLING"); g_subWetStartMs[1] = 0; fsmSub2.handleEvent(Event::SubStart); } });
+
+  // S_COOLING run: motor continues, heater is off; after DRY_COOL_MS -> perform dry-check
+  // If dry-check passes -> advance to DRY. If it fails -> pause UV and go back to WET.
+  fsmSub1.setRun(SubState::S_COOLING, [](){
+    if (g_subCoolingStartMs[0] == 0) return;
+    if ((uint32_t)(millis() - g_subCoolingStartMs[0]) < DRY_COOL_MS) return;
+    FSM_DBG_PRINTLN("SUB1: COOLING timeout -> advance to DRY");
+    g_subCoolingStartMs[0] = 0;
+    // Always advance to DRY when the cooling timer expires. The DRY
+    // entry will perform the sensor dry-check and either return to WET
+    // (pausing UV) or allow UV to continue.
+    fsmSub1.handleEvent(Event::SubStart);
+  });
+
+  fsmSub2.setRun(SubState::S_COOLING, [](){
+    if (g_subCoolingStartMs[1] == 0) return;
+    if ((uint32_t)(millis() - g_subCoolingStartMs[1]) < DRY_COOL_MS) return;
+    FSM_DBG_PRINTLN("SUB2: COOLING timeout -> advance to DRY");
+    g_subCoolingStartMs[1] = 0;
+    // Always advance to DRY; DRY entry decides whether to return to WET or
+    // continue with UV.
+    fsmSub2.handleEvent(Event::SubStart);
+  });
+
+  // S_DRY: on entry, motor should be turned off. If UV already finished during cooling
+  // advance immediately. If UV isn't running (starting-from-DRY scenario), perform a
+  // quick dry-check and start UV; otherwise wait for UV timer to complete.
+  fsmSub1.setRun(SubState::S_DRY, [](){ /* no-op: advancement driven by UV timer or entry checks */ });
 
   // Detecting entry/exit
   fsmGlobal.setEntry(GlobalState::Detecting, [](){ detectingStartMs = millis(); FSM_DBG_PRINTLN("GLOBAL ENTRY: Detecting - equalize timer started"); });
@@ -214,16 +347,33 @@ static void vStateMachineTask(void* /*pvParameters*/) {
             case Event::Shoe0InitWet: case Event::Shoe0InitDry: fsmSub1.handleEvent(m.ev); break;
             case Event::Shoe1InitWet: case Event::Shoe1InitDry: fsmSub2.handleEvent(m.ev); break;
             case Event::SubStart:
-              if (!(fsmSub1.getState() == SubState::S_DRY && !uvTimerFinished(0))) fsmSub1.handleEvent(m.ev);
-              else FSM_DBG_PRINTLN("SUB1: SubStart ignored - UV timer running");
-              if (!(fsmSub2.getState() == SubState::S_DRY && !uvTimerFinished(1))) fsmSub2.handleEvent(m.ev);
-              else FSM_DBG_PRINTLN("SUB2: SubStart ignored - UV timer running");
+              // Allow SubStart to advance subs regardless of UV timer state.
+              fsmSub1.handleEvent(m.ev);
+              fsmSub2.handleEvent(m.ev);
               break;
             case Event::UVTimer0:
-              if (fsmSub1.getState() == SubState::S_DRY) fsmSub1.handleEvent(Event::SubStart);
+              // UV timer expired: if sub1 is in DRY -> advance to DONE.
+              // If sub1 is in COOLING -> mark that UV expired during cooling
+              // and handle progression when COOLING finishes/exits.
+              if (fsmSub1.getState() == SubState::S_DRY) {
+                fsmSub1.handleEvent(Event::SubStart);
+              } else if (fsmSub1.getState() == SubState::S_COOLING) {
+                FSM_DBG_PRINTLN("SUB1: UV timer expired during COOLING -> mark expired (handle on cooling exit)");
+                g_uvExpiredDuringCooling[0] = true;
+              }
+              // Mark UV complete for sub1 so we don't restart it on repeated loops
+              g_uvComplete[0] = true;
               break;
             case Event::UVTimer1:
-              if (fsmSub2.getState() == SubState::S_DRY) fsmSub2.handleEvent(Event::SubStart);
+              if (fsmSub2.getState() == SubState::S_DRY) {
+                fsmSub2.handleEvent(Event::SubStart);
+              } else if (fsmSub2.getState() == SubState::S_COOLING) {
+                FSM_DBG_PRINTLN("SUB2: UV timer expired during COOLING -> mark expired (handle on cooling exit)");
+                g_uvExpiredDuringCooling[1] = true;
+              }
+              // Mark UV complete for sub2 so we don't restart it on repeated loops
+              g_uvComplete[1] = true;
+
               break;
             case Event::SubFSMDone:
               if (fsmSub1.getState() == SubState::S_DONE && fsmSub2.getState() == SubState::S_DONE) fsmGlobal.handleEvent(m.ev);
@@ -249,5 +399,10 @@ static void vStateMachineTask(void* /*pvParameters*/) {
 }
 
 void createStateMachineTask() {
+  motorInit();
   xTaskCreatePinnedToCore(vStateMachineTask, "StateMachineTask", 4096, nullptr, 1, nullptr, 1);
 }
+
+GlobalState getGlobalState() { return fsmGlobal.getState(); }
+SubState getSub1State()    { return fsmSub1.getState(); }
+SubState getSub2State()    { return fsmSub2.getState(); }

@@ -47,7 +47,6 @@ inline const char* subStateName(SubState s) {
 	switch (s) {
 		case SubState::S_IDLE: return "S_IDLE";
 		case SubState::S_WET: return "S_WET";
-		case SubState::S_DRYER: return "S_DRYER";
 		case SubState::S_COOLING: return "S_COOLING";
 		case SubState::S_DRY: return "S_DRY";
 		case SubState::S_DONE: return "S_DONE";

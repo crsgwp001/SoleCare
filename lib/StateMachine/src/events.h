@@ -21,6 +21,7 @@ enum class Event : uint32_t {
   Shoe1InitDry   = 1 << 13,
   UVTimer0       = 1 << 14,
   UVTimer1       = 1 << 15
+ , DryCheckFailed = 1 << 16
 };
 
 // Global FSM states
@@ -39,7 +40,6 @@ enum class GlobalState : uint8_t {
 enum class SubState : uint8_t {
     S_IDLE,
     S_WET,
-    S_DRYER,
     S_COOLING,
     S_DRY,
     S_DONE

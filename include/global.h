@@ -20,8 +20,8 @@ extern float g_dhtAHDiff[2];
 extern float g_dhtAH_ema[3];
 extern float g_dhtAHDiff_ema[2];
 
-// Status strings (e.g., "WET", "DRY", "OK") for sensors 1 and 2
-extern char g_dhtStatus[2][5];
+// Boolean wet/dry status for sensors 1 and 2 (true = wet)
+extern bool g_dhtIsWet[2];
 
 // Ambient AH offset alias (from config)
 static constexpr float kAmbAhOffset = AMB_AH_OFFSET;
