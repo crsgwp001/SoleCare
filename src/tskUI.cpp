@@ -1,16 +1,17 @@
+#include <Arduino.h>
+#include <events.h>
+
 #include "tskUI.h"
 #include "dev_debug.h"
 #include "global.h"
 #include "tskMotor.h"
 #include "tskUV.h"
-#include <Arduino.h>
-#include <events.h>
 #include <ui.h>
+#include "tskFSM.h"
 
 // Remapped OLED1 to pins 25 (SDA) and 26 (SCL) to avoid conflicts with actuator pins
 DisplayUnit oled1(23, 19, 0); // SDA, SCL, Wire0
 DisplayUnit oled2(22, 21, 1); // SDA, SCL, Wire1
-#include "tskFSM.h"
 
 void vMainOledTask(void * /*pv*/) {
   if (!oled1.begin()) {

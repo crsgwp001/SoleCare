@@ -1,10 +1,14 @@
-#include "ui.h"
+// system includes
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+
+// project includes
+#include "ui.h"
 
 // Mutex to protect I2C/display accesses across tasks. Lazily created on first use.
 static SemaphoreHandle_t s_displayMux = NULL;
 
+// File-local helpers
 static void lockDisplay() {
   if (!s_displayMux) {
     s_displayMux = xSemaphoreCreateMutex();
@@ -18,6 +22,7 @@ static void unlockDisplay() {
     xSemaphoreGive(s_displayMux);
 }
 
+// DisplayUnit implementation
 DisplayUnit::DisplayUnit(uint8_t sda, uint8_t scl, uint8_t wireID)
     : sdaPin(sda), sclPin(scl), wire(wireID), display(128, 64, &wire, -1) {}
 
