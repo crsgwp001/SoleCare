@@ -1,7 +1,6 @@
 // Lightweight developer debug helper. Define DEV_DEBUG to enable prints.
 #pragma once
 
-// System includes
 #ifdef DEV_DEBUG
 #include <Arduino.h>
 
