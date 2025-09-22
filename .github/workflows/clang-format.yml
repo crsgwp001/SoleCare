@@ -1,0 +1,28 @@
+name: 'clang-format check'
+
+on:
+  push:
+    branches: [ 'chore/tidy-code', 'release/0.1.9' ]
+  pull_request:
+    branches: [ 'release/0.1.9' ]
+
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - name: Run clang-format check
+        run: |
+          set -e
+          files=$(git ls-files '*.c' '*.cpp' '*.h' '*.hpp' | tr '\n' ' ')
+          if [ -z "$files" ]; then
+            echo 'No C/C++ files to check'; exit 0
+          fi
+          for f in $files; do
+            clang-format -style=file "$f" | diff -u "$f" - || {
+              echo "File $f is not formatted. Run clang-format -i $f";
+              exit 2;
+            }
+          done
