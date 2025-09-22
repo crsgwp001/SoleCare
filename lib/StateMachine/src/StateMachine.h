@@ -1,10 +1,16 @@
 #pragma once
 
 // includes
-#include "fsm_debug.h"
 #include <functional>
 #include <map>
 #include <vector>
+// system includes
+#include <functional>
+#include <map>
+#include <vector>
+
+// project includes
+#include "fsm_debug.h"
 
 // Alias for any callback with no args
 using ActionFn = std::function<void()>;
