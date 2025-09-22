@@ -2,6 +2,7 @@
 #pragma once
 #ifdef FSM_DEBUG
 #include <Arduino.h>
+#include <events.h>
 // Variadic macros let us forward formatting args (eg Serial.print(val, digits)).
 #define FSM_DBG_PRINT(...)                                                                         \
   do {                                                                                             \
@@ -20,8 +21,6 @@
       Serial.println((int)(v));                                                                    \
     }                                                                                              \
   } while (0)
-#include <events.h>
-
 // Optional helpers: human-readable names for events/states. Use like:
 // FSM_DBG_PRINTLN(eventName(ev));
 inline const char *eventName(Event e) {
