@@ -1,6 +1,16 @@
 #pragma once
 
+#ifdef ARDUINO
 #include <Arduino.h>
+#else
+#include <chrono>
+#include <cstdint>
+static inline unsigned long millis() {
+  using namespace std::chrono;
+  static const auto start = steady_clock::now();
+  return static_cast<unsigned long>(duration_cast<milliseconds>(steady_clock::now() - start).count());
+}
+#endif
 
 class PIDcontrol {
 public:
