@@ -1,4 +1,4 @@
-name: CI - Host Tests
+name: CI - PlatformIO native tests
 
 on:
   push:
@@ -7,18 +7,31 @@ on:
     branches: [ main ]
 
 jobs:
-  build-and-test:
+  platformio-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
 
-      - name: Build and run host test harness
+      - name: Install PlatformIO
         run: |
-          g++ -std=c++17 -I test_harness/src test_harness/run_tests.cpp test_harness/src/PIDcontrol.cpp -O2 -o run_tests
-          ./run_tests
+          python -m pip install -U pip
+          python -m pip install -U platformio
+
+      - name: Show PlatformIO version
+        run: platformio --version
+
+      - name: Run PlatformIO native tests
+        working-directory: test_harness
+        run: |
+          platformio test -e native -v
