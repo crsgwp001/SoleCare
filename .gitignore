@@ -3,3 +3,8 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# CI logs
+ci_run_18430650602.log
+# test harness binary
+test_harness/run_tests.exe
