@@ -1,7 +1,0 @@
-{
-  "name": "test_pid_pkg",
-  "version": "0.0.1",
-  "description": "Test package for PIDcontrol unit tests",
-  "frameworks": ["arduino"],
-  "platforms": ["*"]
-}

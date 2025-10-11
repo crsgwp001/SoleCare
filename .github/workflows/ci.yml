@@ -35,6 +35,9 @@ jobs:
         run: |
           platformio run -e esp32dev -v
 
-      - name: Run native unit tests (test env)
+      - name: Run host unit tests (g++ harness)
         run: |
-          platformio test -e test -v
+          echo "Compiling host test harness"
+          g++ -std=c++17 -Itest_harness/src test_harness/run_tests.cpp test_harness/src/PIDcontrol.cpp -o run_tests
+          echo "Running host tests"
+          ./run_tests
