@@ -1,0 +1,13 @@
+{
+  "name": "PIDcontrol",
+  "version": "0.1.0",
+  "description": "Simple PID controller for motor power control",
+  "authors": [
+    {
+      "name": "SoleCare",
+      "email": ""
+    }
+  ],
+  "frameworks": ["arduino"],
+  "platforms": ["*" ]
+}
