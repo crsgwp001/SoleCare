@@ -1,0 +1,24 @@
+name: CI - Host Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Build and run host test harness
+        run: |
+          g++ -std=c++17 -I test_harness/src test_harness/run_tests.cpp test_harness/src/PIDcontrol.cpp -O2 -o run_tests
+          ./run_tests
