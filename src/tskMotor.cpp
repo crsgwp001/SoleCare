@@ -21,8 +21,27 @@ static volatile bool g_motorOn[2] = {false, false};
 static volatile bool g_heaterOn[2] = {false, false};
 static volatile uint32_t g_motorStartMs[2] = {0, 0};
 
+// For motor pins we use LEDC PWM (ESP32) to drive a MOSFET gate. Heaters remain
+// driven as simple digital outputs.
+static const int MOTOR_PWM_FREQ = 5000; // Hz
+static const int MOTOR_PWM_RES = 9;    // bits
+static const int MOTOR_PWM_MAX = (1 << MOTOR_PWM_RES) - 1;
+static const int MOTOR_PWM_TARGET = MOTOR_PWM_MAX * 3 / 4; // 75%
+static const int MOTOR_PWM_STEP = 16; // duty step per loop (rough ramp)
+static const uint8_t MOTOR_PWM_CH[2] = {0, 1};
+
+static volatile int g_motorDuty[2] = {0, 0};
+static volatile int g_motorTargetDuty[2] = {0, 0};
+
 static inline void setActuator(int pin, bool on) {
   digitalWrite(pin, (HW_ACTUATOR_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
+}
+
+static inline void setMotorPWM(uint8_t idx, int duty) {
+  if (idx > 1)
+    return;
+  ledcWrite(MOTOR_PWM_CH[idx], duty);
+  g_motorDuty[idx] = duty;
 }
 
 static void motorTask(void * /*pv*/) {
@@ -37,6 +56,12 @@ static void motorTask(void * /*pv*/) {
   setActuator(HW_HEATER_PIN_0, false);
   setActuator(HW_HEATER_PIN_1, false);
 
+  // Configure LEDC PWM for motors
+  ledcSetup(MOTOR_PWM_CH[0], MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ledcAttachPin(HW_MOTOR_PIN_0, MOTOR_PWM_CH[0]);
+  ledcSetup(MOTOR_PWM_CH[1], MOTOR_PWM_FREQ, MOTOR_PWM_RES);
+  ledcAttachPin(HW_MOTOR_PIN_1, MOTOR_PWM_CH[1]);
+
   MotorMsg msg;
   for (;;) {
     // Check for commands with a short timeout so we also poll sensors
@@ -49,7 +74,10 @@ static void motorTask(void * /*pv*/) {
         // enable motor + heater for this shoe while active
         g_motorOn[i] = true;
         g_heaterOn[i] = true;
-        setActuator((i == 0) ? HW_MOTOR_PIN_0 : HW_MOTOR_PIN_1, true);
+        // ramp to 50% target
+        g_motorTargetDuty[i] = MOTOR_PWM_TARGET;
+        // ensure PWM channel updated immediately
+        setMotorPWM(i, g_motorDuty[i]);
         setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, true);
         DEV_DBG_PRINT("MOTOR: started for idx=");
         DEV_DBG_PRINTLN(i);
@@ -58,7 +86,8 @@ static void motorTask(void * /*pv*/) {
         // disable actuators and mark inactive
         g_motorOn[i] = false;
         g_heaterOn[i] = false;
-        setActuator((i == 0) ? HW_MOTOR_PIN_0 : HW_MOTOR_PIN_1, false);
+        // ramp down to 0 and detach PWM channel
+        g_motorTargetDuty[i] = 0;
         setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, false);
         g_motorActive[i] = false;
         g_motorStartMs[i] = 0;
@@ -67,7 +96,8 @@ static void motorTask(void * /*pv*/) {
         break;
       case MotorCmd::Run:
         g_motorOn[i] = msg.on;
-        setActuator((i == 0) ? HW_MOTOR_PIN_0 : HW_MOTOR_PIN_1, msg.on);
+        g_motorTargetDuty[i] = msg.on ? MOTOR_PWM_TARGET : 0;
+        // ensure PWM updated next loop
         DEV_DBG_PRINT("MOTOR: set motor on=");
         DEV_DBG_PRINTLN(msg.on);
         break;
@@ -106,12 +136,29 @@ static void motorTask(void * /*pv*/) {
         // stop actuators and mark inactive
         g_motorOn[i] = false;
         g_heaterOn[i] = false;
-        setActuator((i == 0) ? HW_MOTOR_PIN_0 : HW_MOTOR_PIN_1, false);
+        g_motorTargetDuty[i] = 0;
         setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, false);
         g_motorActive[i] = false;
         g_motorStartMs[i] = 0;
         // Optionally notify FSM about forced stop (use Reset or Error if desired). For now just
         // log.
+      }
+    }
+
+    // PWM ramping: move current duty towards target duty
+    for (int i = 0; i < 2; ++i) {
+      int cur = g_motorDuty[i];
+      int tgt = g_motorTargetDuty[i];
+      if (cur < tgt) {
+        cur += MOTOR_PWM_STEP;
+        if (cur > tgt)
+          cur = tgt;
+        setMotorPWM(i, cur);
+      } else if (cur > tgt) {
+        cur -= MOTOR_PWM_STEP;
+        if (cur < tgt)
+          cur = tgt;
+        setMotorPWM(i, cur);
       }
     }
 
