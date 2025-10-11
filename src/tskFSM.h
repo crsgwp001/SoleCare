@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Events.h>
+#include <events.h>
 
 void createStateMachineTask(void);
 // Post an Event into the FSM queue from other tasks

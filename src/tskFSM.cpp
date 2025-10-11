@@ -4,7 +4,7 @@
 #include "tskMotor.h"
 #include "tskUV.h"
 #include <Arduino.h>
-#include <Events.h>
+#include <events.h>
 #include <StateMachine.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -53,6 +53,9 @@ static bool g_uvExpiredDuringCooling[2] = {false, false};
 static bool g_uvComplete[2] = {false, false};
 // Protect g_uvComplete access since it's read from UI (core 0) and written by FSM (core 1)
 // (g_uvComplete is internal to FSM)
+
+// Track whether we have started the motor for a sub during the current wet->..->dry cycle.
+static bool g_motorStarted[2] = {false, false};
 
 static void markSubDone(int idx) {
   if (idx == 0)
@@ -268,7 +271,13 @@ static void setupStateMachines() {
       {SubState::S_WET,
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: WET");
-         motorStart(0); /* heater on during wet */
+         // Start motor only the first time we enter WET for this wet->...->dry
+         // cycle. This prevents restarting the motor when returning from
+         // COOLING->WET but ensures the motor is started at the beginning.
+         if (!g_motorStarted[0]) {
+           motorStart(0);
+           g_motorStarted[0] = true;
+         }
          heaterRun(0, true);
          g_subWetStartMs[0] = millis();
        },
@@ -306,7 +315,6 @@ static void setupStateMachines() {
       {SubState::S_DRY,
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: DRY");
-         motorStop(0);
          // If UV expired while in COOLING, we should advance immediately.
          if (g_uvExpiredDuringCooling[0]) {
            FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> UV already expired during COOLING, advancing");
@@ -314,7 +322,8 @@ static void setupStateMachines() {
            fsmSub1.handleEvent(Event::SubStart);
            return;
          }
-         // If sensor reads wet now, go back to WET.
+         // If sensor reads wet now, go back to WET. Do NOT stop the motor here
+         // to avoid stop/start when returning from COOLING->DRY->WET.
          if (g_dhtIsWet[0]) {
            FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> sensor wet, returning to WET");
            // Ensure UV is not running while we go back to wet
@@ -322,6 +331,9 @@ static void setupStateMachines() {
            fsmSub1.handleEvent(Event::DryCheckFailed);
            return;
          }
+         // We are committing to DRY: stop motor for the cycle and mark flag
+         motorStop(0);
+         g_motorStarted[0] = false;
          // Otherwise ensure UV is running (start or resume) and wait for UVTimer to advance
          if (!g_uvComplete[0]) {
            if (uvIsPaused(0)) {
@@ -342,7 +354,10 @@ static void setupStateMachines() {
       {SubState::S_WET,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: WET");
-         motorStart(1); /* heater on during wet */
+         if (!g_motorStarted[1]) {
+           motorStart(1);
+           g_motorStarted[1] = true;
+         }
          heaterRun(1, true);
          g_subWetStartMs[1] = millis();
        },
@@ -369,7 +384,6 @@ static void setupStateMachines() {
       {SubState::S_DRY,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: DRY");
-         motorStop(1);
          // If UV expired while in COOLING, advance immediately.
          if (g_uvExpiredDuringCooling[1]) {
            FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> UV already expired during COOLING, advancing");
@@ -377,13 +391,17 @@ static void setupStateMachines() {
            fsmSub2.handleEvent(Event::SubStart);
            return;
          }
-         // If sensor reads wet now, go back to WET.
+         // If sensor reads wet now, go back to WET. Do NOT stop the motor here
+         // to avoid stop/start when returning from COOLING->DRY->WET.
          if (g_dhtIsWet[1]) {
            FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> sensor wet, returning to WET");
            uvPause(1);
            fsmSub2.handleEvent(Event::DryCheckFailed);
            return;
          }
+         // We are committing to DRY: stop motor for the cycle and mark flag
+         motorStop(1);
+         g_motorStarted[1] = false;
          // Otherwise ensure UV is running (start or resume) and wait for UVTimer.
          if (!g_uvComplete[1]) {
            if (uvIsPaused(1)) {
