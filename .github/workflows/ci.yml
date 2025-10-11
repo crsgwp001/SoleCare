@@ -1,4 +1,4 @@
-name: CI - PlatformIO native tests
+name: CI - PlatformIO build & tests
 
 on:
   push:
@@ -31,7 +31,10 @@ jobs:
       - name: Show PlatformIO version
         run: platformio --version
 
-      - name: Run PlatformIO native tests
-        working-directory: test_harness
+      - name: Build firmware (esp32dev)
         run: |
-          platformio test -e native -v
+          platformio run -e esp32dev -v
+
+      - name: Run native unit tests (test env)
+        run: |
+          platformio test -e test -v
