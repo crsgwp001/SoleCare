@@ -26,7 +26,7 @@ static volatile uint32_t g_motorStartMs[2] = {0, 0};
 static const int MOTOR_PWM_FREQ = 5000; // Hz
 static const int MOTOR_PWM_RES = 9;    // bits
 static const int MOTOR_PWM_MAX = (1 << MOTOR_PWM_RES) - 1;
-static const int MOTOR_PWM_TARGET = MOTOR_PWM_MAX * 3 / 4; // 75%
+static const int MOTOR_PWM_TARGET = MOTOR_PWM_MAX * 4 / 5; // 80%
 static const int MOTOR_PWM_STEP = 16; // duty step per loop (rough ramp)
 static const uint8_t MOTOR_PWM_CH[2] = {0, 1};
 

@@ -1,0 +1,46 @@
+// ...existing code...
+#include <Arduino.h>
+#include "PIDcontrol.h"
+
+// Example: simulate DHT humidity and use PID to compute motor PWM target (normalized 0..1)
+
+PIDcontrol motorPid(2.0, 0.5, 0.1, 500); // tune for your system
+const double desiredHumidity = 40.0; // target RH %
+unsigned long lastSim = 0;
+double simHumidity = 60.0; // starting humidity (higher = wet)
+double simEnv = 25.0;
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+  Serial.println("PID example starting");
+  motorPid.setOutputLimits(0.0, 1.0); // normalized output
+  motorPid.setSetpoint(desiredHumidity);
+  motorPid.setMode(PIDcontrol::AUTOMATIC);
+}
+
+void loop() {
+  unsigned long now = millis();
+  if (now - lastSim >= 500) {
+    lastSim = now;
+
+    // Simple simulation: motor effect reduces humidity when running.
+    // PID output (0..1) represents motor power fraction.
+    double control = motorPid.getOutput(); // last computed output
+    // simulate effect: stronger motor lowers humidity faster
+    simHumidity += 0.1 - control * 0.8; // drift towards setpoint when motor runs
+
+    // Read current (simulated) humidity as sensor input
+    double currentHumidity = simHumidity;
+
+    // Compute new PID output
+    double pidOut = motorPid.compute(currentHumidity); // 0..1
+    int pwmPercent = int(pidOut * 100.0 + 0.5);
+
+    // Print status
+    Serial.printf("RH: %.2f %%  PID: %.3f  PWM: %d %%\r\n", currentHumidity, pidOut, pwmPercent);
+  }
+
+  // Keep loop responsive
+  delay(10);
+}
