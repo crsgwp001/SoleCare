@@ -27,6 +27,14 @@ extern float g_dhtAHDiff_ema[2];
 // Boolean wet/dry status for sensors 1 and 2 (true = wet)
 extern bool g_dhtIsWet[2];
 
+// Battery voltage monitoring
+float readBatteryVoltage();
+bool isBatteryOk();
+bool isBatteryRecovered();
+
+// LED status control
+void updateStatusLEDs();
+
 // Enum bit helpers: enable bitwise ops for enum types. These are small helpers
 // and only enabled for enum types via SFINAE.
 template <typename E>

@@ -35,11 +35,12 @@ inline const char *eventName(Event e) {
     return "ResetPressed";
   if (v == static_cast<uint32_t>(Event::StartPressed))
     return "StartPressed";
-  // SubStart and BatteryLow share the same numeric value; return combined label
   if (v == static_cast<uint32_t>(Event::SubStart))
-    return "SubStart/BatteryLow";
-  if (v == static_cast<uint32_t>(Event::BatteryReady))
-    return "BatteryReady";
+    return "SubStart";
+  if (v == static_cast<uint32_t>(Event::BatteryLow))
+    return "BatteryLow";
+  if (v == static_cast<uint32_t>(Event::BatteryRecovered))
+    return "BatteryRecovered";
   if (v == static_cast<uint32_t>(Event::ChargeDetected))
     return "ChargeDetected";
   if (v == static_cast<uint32_t>(Event::SensorTimeout))
@@ -69,6 +70,8 @@ inline const char *globalStateName(GlobalState s) {
     return "Running";
   case GlobalState::Done:
     return "Done";
+  case GlobalState::LowBattery:
+    return "LowBattery";
   case GlobalState::Error:
     return "Error";
   case GlobalState::Debug:

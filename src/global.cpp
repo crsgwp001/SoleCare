@@ -16,3 +16,33 @@ float g_dhtAHDiff_ema[2] = {NAN, NAN};
 
 // boolean status: true == wet
 bool g_dhtIsWet[2] = {false, false};
+
+// Battery voltage monitoring implementation
+float readBatteryVoltage() {
+  long sum = 0;
+  for (int i = 0; i < BATTERY_ADC_SAMPLES; i++) {
+    sum += analogRead(HW_BATTERY_ADC_PIN);
+    delay(2);
+  }
+  int raw = sum / BATTERY_ADC_SAMPLES;
+  
+  float vAdc = (raw / 4095.0f) * BATTERY_VFS;
+  float vBat = vAdc * (BATTERY_R1 + BATTERY_R2) / BATTERY_R2;
+  return vBat;
+}
+
+bool isBatteryOk() {
+  float voltage = readBatteryVoltage();
+  return voltage >= BATTERY_LOW_THRESHOLD;
+}
+
+bool isBatteryRecovered() {
+  float voltage = readBatteryVoltage();
+  return voltage >= BATTERY_RECOVERY_THRESHOLD;
+}
+
+// LED status control - called from FSM
+void updateStatusLEDs() {
+  // This is a placeholder - actual LED control is done directly in FSM state callbacks
+  // to avoid circular dependencies
+}

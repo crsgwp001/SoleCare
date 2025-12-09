@@ -12,18 +12,18 @@ enum class Event : uint32_t {
   StartPressed = 1 << 4,
   // Internal event used to auto-start sub-FSMs (distinct from the physical Start button)
   SubStart = 1 << 5,
-  BatteryLow = 1 << 5,
-  BatteryReady = 1 << 6,
-  ChargeDetected = 1 << 7,
-  SensorTimeout = 1 << 8,
-  SubFSMDone = 1 << 9,
-  Shoe0InitWet = 1 << 10,
-  Shoe0InitDry = 1 << 11,
-  Shoe1InitWet = 1 << 12,
-  Shoe1InitDry = 1 << 13,
-  UVTimer0 = 1 << 14,
-  UVTimer1 = 1 << 15,
-  DryCheckFailed = 1 << 16
+  BatteryLow = 1 << 6,
+  BatteryRecovered = 1 << 7,
+  ChargeDetected = 1 << 8,
+  SensorTimeout = 1 << 9,
+  SubFSMDone = 1 << 10,
+  Shoe0InitWet = 1 << 11,
+  Shoe0InitDry = 1 << 12,
+  Shoe1InitWet = 1 << 13,
+  Shoe1InitDry = 1 << 14,
+  UVTimer0 = 1 << 15,
+  UVTimer1 = 1 << 16,
+  DryCheckFailed = 1 << 17
 };
 
 // Global FSM states
@@ -33,6 +33,7 @@ enum class GlobalState : uint8_t {
   Checking,
   Running,
   Done,
+  LowBattery,
   Error,
   Debug,
   Count

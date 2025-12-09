@@ -57,6 +57,13 @@ static bool g_uvComplete[2] = {false, false};
 // Track whether we have started the motor for a sub during the current wet->..->dry cycle.
 static bool g_motorStarted[2] = {false, false};
 
+// LED status tracking
+static uint32_t g_ledBlinkMs = 0;  // Timestamp for LED blinking
+static bool g_ledBlinkState = false;  // Current blink state
+
+// Battery check timestamp for LowBattery state
+static uint32_t g_lastBatteryCheckMs = 0;
+
 static void markSubDone(int idx) {
   if (idx == 0)
     g_subDoneMask |= 1u;
@@ -136,6 +143,10 @@ static void setupStateMachines() {
        []() { FSM_DBG_PRINTLN("GLOBAL: Sensor timeout -> Checking"); }},
       {GlobalState::Checking, Event::StartPressed, GlobalState::Running,
        []() { FSM_DBG_PRINTLN("GLOBAL: Checking -> Running"); }},
+      {GlobalState::Checking, Event::BatteryLow, GlobalState::LowBattery,
+       []() { FSM_DBG_PRINTLN("GLOBAL: Battery low -> LowBattery"); }},
+      {GlobalState::LowBattery, Event::BatteryRecovered, GlobalState::Idle,
+       []() { FSM_DBG_PRINTLN("GLOBAL: Battery recovered -> Idle"); }},
       {GlobalState::Running, Event::SubFSMDone, GlobalState::Done,
        []() { FSM_DBG_PRINTLN("GLOBAL: All subs done -> Done"); }},
       {GlobalState::Idle, Event::Error, GlobalState::Error,
@@ -211,16 +222,6 @@ static void setupStateMachines() {
     fsmSub2.run();
   });
 
-  // Running entry: initialize subs (post init events; do not auto-kick SubStart)
-  fsmGlobal.setEntry(GlobalState::Running, []() {
-    // use boolean wet flags populated by tskDHT
-    bool s1Wet = g_dhtIsWet[0];
-    bool s2Wet = g_dhtIsWet[1];
-    FSM_DBG_PRINTLN("GLOBAL ENTRY: Running - initializing subs");
-    fsmPostEvent(s1Wet ? Event::Shoe0InitWet : Event::Shoe0InitDry, false);
-    fsmPostEvent(s2Wet ? Event::Shoe1InitWet : Event::Shoe1InitDry, false);
-  });
-
   // Register entry/exit callbacks
   struct StateCBG {
     GlobalState s;
@@ -234,17 +235,7 @@ static void setupStateMachines() {
   };
 
   static StateCBG global_cbs[] = {
-      {GlobalState::Running,
-       []() {
-         bool s1Wet = g_dhtIsWet[0];
-         bool s2Wet = g_dhtIsWet[1];
-         FSM_DBG_PRINTLN("GLOBAL ENTRY: Running - initializing subs");
-         g_uvComplete[0] = g_uvComplete[1] = false;
-         fsmPostEvent(s1Wet ? Event::Shoe0InitWet : Event::Shoe0InitDry, false);
-         fsmPostEvent(s2Wet ? Event::Shoe1InitWet : Event::Shoe1InitDry, false);
-       },
-       nullptr},
-      {GlobalState::Detecting,
+       {GlobalState::Detecting,
        []() {
          detectingStartMs = millis();
          FSM_DBG_PRINTLN("GLOBAL ENTRY: Detecting - equalize timer started");
@@ -263,6 +254,11 @@ static void setupStateMachines() {
          g_subDoneMask = 0;
          g_uvComplete[0] = g_uvComplete[1] = false;
          g_doneStartMs = millis();
+         // Blink status LED in Done state, ensure error LED is off
+         digitalWrite(HW_ERROR_LED_PIN, LOW);
+         digitalWrite(HW_STATUS_LED_PIN, LOW);
+         g_ledBlinkMs = millis();
+         g_ledBlinkState = false;
        },
        []() { g_doneStartMs = 0; }}};
 
@@ -509,12 +505,101 @@ static void setupStateMachines() {
 
   // Ensure Done exit clears the done-start timestamp used for auto-reset
   fsmGlobal.setExit(GlobalState::Done, []() { g_doneStartMs = 0; });
+
+  // Checking state: run callback to check battery before allowing transition to Running
+  fsmGlobal.setRun(GlobalState::Checking, []() {
+    // Battery check performed here; if user presses Start and battery is low, post BatteryLow event
+    // The transition to Running will only occur if battery is OK
+  });
+
+  // Checking state entry: perform battery check immediately
+  fsmGlobal.setEntry(GlobalState::Checking, []() {
+    FSM_DBG_PRINTLN("GLOBAL ENTRY: Checking - verifying battery voltage");
+    // Turn on status LED when checking
+    digitalWrite(HW_STATUS_LED_PIN, HIGH);
+    digitalWrite(HW_ERROR_LED_PIN, LOW);
+    if (!isBatteryOk()) {
+      float vBat = readBatteryVoltage();
+      FSM_DBG_PRINT("GLOBAL: Battery voltage low: ");
+      if (Serial) Serial.printf("%.2f V\n", vBat);
+      fsmPostEvent(Event::BatteryLow, false);
+    }
+  });
+
+  // LowBattery state: continuously check battery and turn off status LED, turn on error LED
+  fsmGlobal.setEntry(GlobalState::LowBattery, []() {
+    FSM_DBG_PRINTLN("GLOBAL ENTRY: LowBattery - waiting for battery recovery");
+    digitalWrite(HW_STATUS_LED_PIN, LOW);   // Status LED off
+    digitalWrite(HW_ERROR_LED_PIN, HIGH);   // Error LED solid on
+    g_lastBatteryCheckMs = millis();
+  });
+
+  fsmGlobal.setRun(GlobalState::LowBattery, []() {
+    uint32_t now = millis();
+    if ((uint32_t)(now - g_lastBatteryCheckMs) >= BATTERY_CHECK_INTERVAL_MS) {
+      g_lastBatteryCheckMs = now;
+      if (isBatteryRecovered()) {
+        float vBat = readBatteryVoltage();
+        FSM_DBG_PRINT("GLOBAL: Battery recovered: ");
+        if (Serial) Serial.printf("%.2f V\n", vBat);
+        fsmPostEvent(Event::BatteryRecovered, false);
+      }
+    }
+  });
+
+  fsmGlobal.setExit(GlobalState::LowBattery, []() {
+    FSM_DBG_PRINTLN("GLOBAL EXIT: LowBattery");
+    digitalWrite(HW_ERROR_LED_PIN, LOW);  // Turn off error LED
+  });
+
+  // Idle state: status LED on, error LED off
+  fsmGlobal.setEntry(GlobalState::Idle, []() {
+    digitalWrite(HW_STATUS_LED_PIN, HIGH);
+    digitalWrite(HW_ERROR_LED_PIN, LOW);
+  });
+
+  // Running state: status LED off, error LED blinking + initialize subs
+  fsmGlobal.setEntry(GlobalState::Running, []() {
+    // Initialize substates
+    bool s1Wet = g_dhtIsWet[0];
+    bool s2Wet = g_dhtIsWet[1];
+    FSM_DBG_PRINTLN("GLOBAL ENTRY: Running - initializing subs");
+    g_uvComplete[0] = g_uvComplete[1] = false;
+    g_motorStarted[0] = g_motorStarted[1] = false;
+    // Directly handle init events to ensure substates transition immediately
+    fsmSub1.handleEvent(s1Wet ? Event::Shoe0InitWet : Event::Shoe0InitDry);
+    fsmSub2.handleEvent(s2Wet ? Event::Shoe1InitWet : Event::Shoe1InitDry);
+    
+    // LED initialization for running state
+    digitalWrite(HW_STATUS_LED_PIN, LOW);   // Status LED off when running
+    digitalWrite(HW_ERROR_LED_PIN, LOW);    // Start with error LED off
+    g_ledBlinkMs = millis();
+    g_ledBlinkState = false;
+  });
+
+  // Error state: status LED off, error LED solid on
+  fsmGlobal.setEntry(GlobalState::Error, []() {
+    digitalWrite(HW_STATUS_LED_PIN, LOW);
+    digitalWrite(HW_ERROR_LED_PIN, HIGH);  // Solid on for error
+  });
 }
 
 // FreeRTOS task that drives all FSMs
 static void vStateMachineTask(void * /*pvParameters*/) {
   pinMode(START_PIN, INPUT_PULLUP);
   pinMode(RESET_PIN, INPUT_PULLUP);
+  
+  // Initialize battery ADC
+  analogReadResolution(12);
+  analogSetPinAttenuation(HW_BATTERY_ADC_PIN, ADC_11db);
+  pinMode(HW_BATTERY_ADC_PIN, INPUT);
+  
+  // Initialize status LEDs
+  pinMode(HW_STATUS_LED_PIN, OUTPUT);
+  pinMode(HW_ERROR_LED_PIN, OUTPUT);
+  digitalWrite(HW_STATUS_LED_PIN, HIGH);  // Status LED on at startup
+  digitalWrite(HW_ERROR_LED_PIN, LOW);    // Error LED off at startup
+  
   if (!g_fsmEventQ)
     g_fsmEventQ = xQueueCreate(FSM_QUEUE_LEN, sizeof(EventMsg));
   uvInit();
@@ -612,6 +697,28 @@ static void vStateMachineTask(void * /*pvParameters*/) {
         fsmPostEvent(Event::ResetPressed, /*broadcastAll=*/true);
         g_doneStartMs = 0;
       }
+    }
+
+    // Handle LED blinking for Running (error LED) and Done (status LED)
+    if (fsmGlobal.getState() == GlobalState::Running) {
+      uint32_t now = millis();
+      if ((uint32_t)(now - g_ledBlinkMs) >= 500u) {  // Blink every 500ms
+        g_ledBlinkMs = now;
+        g_ledBlinkState = !g_ledBlinkState;
+        digitalWrite(HW_ERROR_LED_PIN, g_ledBlinkState ? HIGH : LOW);
+      }
+    } else if (fsmGlobal.getState() == GlobalState::Done) {
+      uint32_t now = millis();
+      if ((uint32_t)(now - g_ledBlinkMs) >= 500u) {  // Blink every 500ms
+        g_ledBlinkMs = now;
+        g_ledBlinkState = !g_ledBlinkState;
+        digitalWrite(HW_STATUS_LED_PIN, g_ledBlinkState ? HIGH : LOW);
+      }
+      // Ensure error LED stays off in Done
+      digitalWrite(HW_ERROR_LED_PIN, LOW);
+    } else {
+      // Not Running or Done: keep error LED off unless state-specific entry sets it
+      digitalWrite(HW_ERROR_LED_PIN, LOW);
     }
 
     fsmGlobal.run();

@@ -57,4 +57,18 @@ constexpr int HW_HEATER_PIN_1 = 12;
 // Set true if outputs are active-low
 constexpr bool HW_ACTUATOR_ACTIVE_LOW = false;
 
+// Battery voltage monitoring (voltage divider on ADC)
+constexpr int HW_BATTERY_ADC_PIN = 39;  // GPIO39 (ADC1_CH3)
+constexpr float BATTERY_R1 = 33000.0f;  // Upper resistor in voltage divider (Ohms)
+constexpr float BATTERY_R2 = 10000.0f;  // Lower resistor in voltage divider (Ohms)
+constexpr float BATTERY_VFS = 3.28f;    // ADC full-scale voltage (measure your 3.3V rail)
+constexpr float BATTERY_LOW_THRESHOLD = 3.0f;  // Minimum battery voltage to run (V)
+constexpr float BATTERY_RECOVERY_THRESHOLD = 3.2f;  // Battery voltage to exit LowBattery state (V)
+constexpr int BATTERY_ADC_SAMPLES = 32; // Number of samples to average
+constexpr uint32_t BATTERY_CHECK_INTERVAL_MS = 1000u; // Check battery every 1 second in LowBattery state
+
+// Status LED pins
+constexpr int HW_STATUS_LED_PIN = 32;   // Green LED - on when idle/ready, off when running
+constexpr int HW_ERROR_LED_PIN = 33;    // Red LED - blinks when running, solid on error
+
 // ------------------------------------------------------------------

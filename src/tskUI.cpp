@@ -9,8 +9,8 @@
 #include <events.h>
 
 // Remapped OLED1 to pins 25 (SDA) and 26 (SCL) to avoid conflicts with actuator pins
-DisplayUnit oled1(23, 19, 0); // SDA, SCL, Wire0
-DisplayUnit oled2(22, 21, 1); // SDA, SCL, Wire1
+DisplayUnit oled1(23, 21, 0); // SDA, SCL, Wire0
+DisplayUnit oled2(22, 19, 1); // SDA, SCL, Wire1
 
 void vMainOledTask(void * /*pv*/) {
   if (!oled1.begin()) {
@@ -40,6 +40,9 @@ void vMainOledTask(void * /*pv*/) {
       break;
     case GlobalState::Done:
       gss = "DONE";
+      break;
+    case GlobalState::LowBattery:
+      gss = "LOWB";
       break;
     case GlobalState::Error:
       gss = "ERR";
