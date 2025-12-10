@@ -64,38 +64,31 @@ void vMainOledTask(void * /*pv*/) {
                        : (ss2 == SubState::S_DONE)    ? "DONE"
                                                       : "IDLE";
 
-    // get actuator and UV states
-    bool uv0 = uvIsStarted(0), uv1 = uvIsStarted(1);
-    bool uv0p = uvIsPaused(0), uv1p = uvIsPaused(1);
+    // get actuator and UV states (single UV on channel 0 only)
+    bool uv0 = uvIsStarted(0);
+    bool uv0p = uvIsPaused(0);
     bool m0 = motorIsOn(0), m1 = motorIsOn(1);
     bool ht0 = heaterIsOn(0), ht1 = heaterIsOn(1);
     uint32_t m0ms = motorActiveMs(0), m1ms = motorActiveMs(1);
-    uint32_t uv0rem = uvRemainingMs(0), uv1rem = uvRemainingMs(1);
+    uint32_t uv0rem = uvRemainingMs(0);
 
-    // Compose a compact indicators view for OLED1
-    char msg[128];
-    // show UV remaining seconds and paused marker
-    char uv0s[16], uv1s[16];
-    if (uv0) {
-      if (uv0p)
-        snprintf(uv0s, sizeof(uv0s), "PAUS %2lus", (unsigned long)(uv0rem / 1000u));
-      else
-        snprintf(uv0s, sizeof(uv0s), "%2lus", (unsigned long)(uv0rem / 1000u));
-    } else
+    // Compose a compact, short message to avoid OLED wrap artifacts
+    char msg[96];
+    char uv0s[12];
+    if (uv0)
+      snprintf(uv0s, sizeof(uv0s), uv0p ? "P %lus" : "%lus", (unsigned long)(uv0rem / 1000u));
+    else
       snprintf(uv0s, sizeof(uv0s), "--");
-    if (uv1) {
-      if (uv1p)
-        snprintf(uv1s, sizeof(uv1s), "PAUS %2lus", (unsigned long)(uv1rem / 1000u));
-      else
-        snprintf(uv1s, sizeof(uv1s), "%2lus", (unsigned long)(uv1rem / 1000u));
-    } else
-      snprintf(uv1s, sizeof(uv1s), "--");
 
+    // Limit line lengths to keep within 128px width (21 chars approx)
     snprintf(msg, sizeof(msg),
-             "G:%-4s S1:%-4s S2:%-4s\nM0:%s H0:%s t:%2lus  M1:%s H1:%s t:%2lus\nUV0:%6s UV1:%6s",
-             gss, sss1, sss2, m0 ? "ON" : "off", ht0 ? "ON" : "off", (unsigned long)(m0ms / 1000u),
-             m1 ? "ON" : "off", ht1 ? "ON" : "off", (unsigned long)(m1ms / 1000u), uv0s, uv1s);
-    oled1.showMessage(String(msg), uv0, uv1, uv0p, uv1p);
+             "G:%s S1:%s S2:%s\nM0:%s H0:%s t:%lus\nM1:%s H1:%s t:%lus\nUV:%s",
+             gss, sss1, sss2,
+             m0 ? "on" : "off", ht0 ? "on" : "off", (unsigned long)(m0ms / 1000u),
+             m1 ? "on" : "off", ht1 ? "on" : "off", (unsigned long)(m1ms / 1000u),
+             uv0s);
+
+    oled1.showMessage(String(msg), uv0, false, uv0p, false);
     vTaskDelay(pdMS_TO_TICKS(1200));
   }
 }

@@ -285,63 +285,27 @@ static void setupStateMachines() {
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING"); /* turn heater off, motor kept running */
          heaterRun(0, false);
-         // On cooling entry ensure UV is running for the cooling period: if it
-         // was paused resume it; if it wasn't started, start it. Clear any
-         // previous 'expired during cooling' marker.
-         g_uvExpiredDuringCooling[0] = false;
-         if (!g_uvComplete[0]) {
-           if (uvIsPaused(0)) {
-             FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING -> resuming UV");
-             uvResume(0);
-           } else if (!uvIsStarted(0)) {
-             FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING -> starting UV");
-             uvStart(0, 0);
-           }
-         } else {
-           FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING -> UV already complete, not starting");
-         }
          g_subCoolingStartMs[0] = millis();
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: leaving COOLING"); /* leaving cooling */
        }},
-      // S_DRY: on entry stop motor; if UV already expired (timer fired during cooling)
-      // then the sub will be advanced by the UVTimer event. If starting from DRY, start
-      // UV here only after an immediate dry-check (to avoid skipping the UV duration).
+      // S_DRY: on entry stop motor; start single UV (GPIO14) when BOTH shoes reach DRY
       {SubState::S_DRY,
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: DRY");
-         // If UV expired while in COOLING, we should advance immediately.
-         if (g_uvExpiredDuringCooling[0]) {
-           FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> UV already expired during COOLING, advancing");
-           g_uvExpiredDuringCooling[0] = false;
-           fsmSub1.handleEvent(Event::SubStart);
-           return;
-         }
-         // If sensor reads wet now, go back to WET. Do NOT stop the motor here
-         // to avoid stop/start when returning from COOLING->DRY->WET.
          if (g_dhtIsWet[0]) {
            FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> sensor wet, returning to WET");
-           // Ensure UV is not running while we go back to wet
-           uvPause(0);
            fsmSub1.handleEvent(Event::DryCheckFailed);
            return;
          }
-         // We are committing to DRY: stop motor for the cycle and mark flag
          motorStop(0);
          g_motorStarted[0] = false;
-         // Otherwise ensure UV is running (start or resume) and wait for UVTimer to advance
-         if (!g_uvComplete[0]) {
-           if (uvIsPaused(0)) {
-             FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> resuming UV");
-             uvResume(0);
-           } else if (!uvIsStarted(0)) {
-             FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> starting UV");
-             uvStart(0, 0);
-           }
+         if (fsmSub2.getState() == SubState::S_DRY && !g_uvComplete[0] && !uvIsStarted(0)) {
+           FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> Both shoes dry, starting single UV on GPIO14");
+           uvStart(0, 0);
          } else {
-           FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> UV already complete, advancing");
-           fsmSub1.handleEvent(Event::SubStart);
+           FSM_DBG_PRINTLN("SUB1 ENTRY: DRY -> Waiting for other shoe or UV to complete");
          }
        },
        nullptr}};
@@ -362,54 +326,24 @@ static void setupStateMachines() {
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING");
          heaterRun(1, false);
-         g_uvExpiredDuringCooling[1] = false;
-         if (!g_uvComplete[1]) {
-           if (uvIsPaused(1)) {
-             FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING -> resuming UV");
-             uvResume(1);
-           } else if (!uvIsStarted(1)) {
-             FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING -> starting UV");
-             uvStart(1, 0);
-           }
-         } else {
-           FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING -> UV already complete, not starting");
-         }
          g_subCoolingStartMs[1] = millis();
        },
        []() { FSM_DBG_PRINTLN("SUB2 EXIT: leaving COOLING"); }},
       {SubState::S_DRY,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: DRY");
-         // If UV expired while in COOLING, advance immediately.
-         if (g_uvExpiredDuringCooling[1]) {
-           FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> UV already expired during COOLING, advancing");
-           g_uvExpiredDuringCooling[1] = false;
-           fsmSub2.handleEvent(Event::SubStart);
-           return;
-         }
-         // If sensor reads wet now, go back to WET. Do NOT stop the motor here
-         // to avoid stop/start when returning from COOLING->DRY->WET.
          if (g_dhtIsWet[1]) {
            FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> sensor wet, returning to WET");
-           uvPause(1);
            fsmSub2.handleEvent(Event::DryCheckFailed);
            return;
          }
-         // We are committing to DRY: stop motor for the cycle and mark flag
          motorStop(1);
          g_motorStarted[1] = false;
-         // Otherwise ensure UV is running (start or resume) and wait for UVTimer.
-         if (!g_uvComplete[1]) {
-           if (uvIsPaused(1)) {
-             FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> resuming UV");
-             uvResume(1);
-           } else if (!uvIsStarted(1)) {
-             FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> starting UV");
-             uvStart(1, 0);
-           }
+         if (fsmSub1.getState() == SubState::S_DRY && !g_uvComplete[0] && !uvIsStarted(0)) {
+           FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> Both shoes dry, starting single UV on GPIO14");
+           uvStart(0, 0);
          } else {
-           FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> UV already complete, advancing");
-           fsmSub2.handleEvent(Event::SubStart);
+           FSM_DBG_PRINTLN("SUB2 ENTRY: DRY -> Waiting for other shoe or UV to complete");
          }
        },
        nullptr}};
@@ -654,30 +588,22 @@ static void vStateMachineTask(void * /*pvParameters*/) {
             fsmSub2.handleEvent(m.ev);
             break;
           case Event::UVTimer0:
-            // UV timer expired: if sub1 is in DRY -> advance to DONE.
-            // If sub1 is in COOLING -> mark that UV expired during cooling
-            // and handle progression when COOLING finishes/exits.
+            // Single UV timer expired: advance BOTH subs if they are in DRY
+            FSM_DBG_PRINTLN("UV timer expired on GPIO14");
             if (fsmSub1.getState() == SubState::S_DRY) {
+              FSM_DBG_PRINTLN("SUB1: in DRY, advancing to DONE");
               fsmSub1.handleEvent(Event::SubStart);
-            } else if (fsmSub1.getState() == SubState::S_COOLING) {
-              FSM_DBG_PRINTLN(
-                  "SUB1: UV timer expired during COOLING -> mark expired (handle on cooling exit)");
-              g_uvExpiredDuringCooling[0] = true;
             }
-            // Mark UV complete for sub1 so we don't restart it on repeated loops
+            if (fsmSub2.getState() == SubState::S_DRY) {
+              FSM_DBG_PRINTLN("SUB2: in DRY, advancing to DONE");
+              fsmSub2.handleEvent(Event::SubStart);
+            }
+            // Mark UV complete so we don't restart it
             g_uvComplete[0] = true;
             break;
           case Event::UVTimer1:
-            if (fsmSub2.getState() == SubState::S_DRY) {
-              fsmSub2.handleEvent(Event::SubStart);
-            } else if (fsmSub2.getState() == SubState::S_COOLING) {
-              FSM_DBG_PRINTLN(
-                  "SUB2: UV timer expired during COOLING -> mark expired (handle on cooling exit)");
-              g_uvExpiredDuringCooling[1] = true;
-            }
-            // Mark UV complete for sub2 so we don't restart it on repeated loops
-            g_uvComplete[1] = true;
-
+            // UVTimer1 not used with single UV, ignore
+            FSM_DBG_PRINTLN("UVTimer1 ignored (single UV mode)");
             break;
           case Event::SubFSMDone:
             if (fsmSub1.getState() == SubState::S_DONE && fsmSub2.getState() == SubState::S_DONE)
@@ -700,14 +626,15 @@ static void vStateMachineTask(void * /*pvParameters*/) {
     }
 
     // Handle LED blinking for Running (error LED) and Done (status LED)
-    if (fsmGlobal.getState() == GlobalState::Running) {
+    auto gsNow = fsmGlobal.getState();
+    if (gsNow == GlobalState::Running) {
       uint32_t now = millis();
       if ((uint32_t)(now - g_ledBlinkMs) >= 500u) {  // Blink every 500ms
         g_ledBlinkMs = now;
         g_ledBlinkState = !g_ledBlinkState;
         digitalWrite(HW_ERROR_LED_PIN, g_ledBlinkState ? HIGH : LOW);
       }
-    } else if (fsmGlobal.getState() == GlobalState::Done) {
+    } else if (gsNow == GlobalState::Done) {
       uint32_t now = millis();
       if ((uint32_t)(now - g_ledBlinkMs) >= 500u) {  // Blink every 500ms
         g_ledBlinkMs = now;
@@ -716,6 +643,9 @@ static void vStateMachineTask(void * /*pvParameters*/) {
       }
       // Ensure error LED stays off in Done
       digitalWrite(HW_ERROR_LED_PIN, LOW);
+    } else if (gsNow == GlobalState::LowBattery) {
+      // Keep error LED solid on while in LowBattery
+      digitalWrite(HW_ERROR_LED_PIN, HIGH);
     } else {
       // Not Running or Done: keep error LED off unless state-specific entry sets it
       digitalWrite(HW_ERROR_LED_PIN, LOW);

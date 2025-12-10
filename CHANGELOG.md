@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.1.12-rc1 - (2025-12-10)
+
+Highlights
+- UV: Single-channel UV now runs on GPIO14 with PWM MOSFET drive; starts only when both shoes reach DRY and the UV timer advances both subs to DONE. UVTimer1 events are ignored in single-UV mode.
+- FSM & battery: LowBattery keeps the error LED solid and prevents other LED logic from overriding it; DRY entry no longer pre-advances and waits for the UV timer to complete.
+- UI: OLED1 message shortened to avoid wrap artifacts and now shows a single UV indicator; OLED2 unchanged for AH/ΔAH status.
+- Hardware control: Heaters now use relay control (active-high by default), motors remain PWM-driven; hardware config centralized and tidied in `include/config.h`.
+- Tooling: Added VS Code `tasks.json` for running PlatformIO builds locally.
+
+Testing checklist
+1. PlatformIO build succeeds (`platformio run`).
+2. Run a full drying cycle: UV should start only after both shoes are DRY and run the full default duration (10s), advancing both subs to DONE.
+3. Trigger LowBattery: error LED should remain solid until recovery; status LED stays off.
+4. Verify OLED1 displays compact lines (no wrapping) and shows a single UV timer/paused state; OLED2 continues to show AH/ΔAH and shoe wet/dry state.
+
 ## v0.1.9 - (2025-09-23)
 
 Highlights

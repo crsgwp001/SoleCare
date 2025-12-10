@@ -1,4 +1,5 @@
 // tskMotor.cpp - Motor and heater control task
+// Motor uses PWM (MOSFET), Heater uses relay control
 #include "tskMotor.h"
 #include "global.h"
 #include "dev_debug.h"
@@ -21,8 +22,8 @@ static volatile bool g_motorOn[2] = {false, false};
 static volatile bool g_heaterOn[2] = {false, false};
 static volatile uint32_t g_motorStartMs[2] = {0, 0};
 
-// For motor pins we use LEDC PWM (ESP32) to drive a MOSFET gate. Heaters remain
-// driven as simple digital outputs.
+// For motor pins we use LEDC PWM (ESP32) to drive a MOSFET gate. 
+// Heaters now use relay control (simple on/off).
 static const int MOTOR_PWM_FREQ = 5000; // Hz
 static const int MOTOR_PWM_RES = 9;    // bits
 static const int MOTOR_PWM_MAX = (1 << MOTOR_PWM_RES) - 1;
@@ -35,6 +36,12 @@ static volatile int g_motorTargetDuty[2] = {0, 0};
 
 static inline void setActuator(int pin, bool on) {
   digitalWrite(pin, (HW_ACTUATOR_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
+}
+
+// Heater now uses relay control
+static inline void setHeaterRelay(uint8_t idx, bool on) {
+  const int pin = (idx == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1;
+  digitalWrite(pin, (HW_RELAY_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
 }
 
 static inline void setMotorPWM(uint8_t idx, int duty) {
@@ -53,8 +60,8 @@ static void motorTask(void * /*pv*/) {
   // ensure off
   setActuator(HW_MOTOR_PIN_0, false);
   setActuator(HW_MOTOR_PIN_1, false);
-  setActuator(HW_HEATER_PIN_0, false);
-  setActuator(HW_HEATER_PIN_1, false);
+  setHeaterRelay(0, false); // Heater now uses relay control
+  setHeaterRelay(1, false);
 
   // Configure LEDC PWM for motors
   ledcSetup(MOTOR_PWM_CH[0], MOTOR_PWM_FREQ, MOTOR_PWM_RES);
@@ -78,7 +85,7 @@ static void motorTask(void * /*pv*/) {
         g_motorTargetDuty[i] = MOTOR_PWM_TARGET;
         // ensure PWM channel updated immediately
         setMotorPWM(i, g_motorDuty[i]);
-        setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, true);
+        setHeaterRelay(i, true); // Heater uses relay control
         DEV_DBG_PRINT("MOTOR: started for idx=");
         DEV_DBG_PRINTLN(i);
         break;
@@ -88,7 +95,7 @@ static void motorTask(void * /*pv*/) {
         g_heaterOn[i] = false;
         // ramp down to 0 and detach PWM channel
         g_motorTargetDuty[i] = 0;
-        setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, false);
+        setHeaterRelay(i, false); // Heater uses relay control
         g_motorActive[i] = false;
         g_motorStartMs[i] = 0;
         DEV_DBG_PRINT("MOTOR: stopped for idx=");
@@ -103,7 +110,7 @@ static void motorTask(void * /*pv*/) {
         break;
       case MotorCmd::Heater:
         g_heaterOn[i] = msg.on;
-        setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, msg.on);
+        setHeaterRelay(i, msg.on); // Heater uses relay control
         DEV_DBG_PRINT("MOTOR: set heater on=");
         DEV_DBG_PRINTLN(msg.on);
         break;
@@ -122,7 +129,7 @@ static void motorTask(void * /*pv*/) {
         DEV_DBG_PRINTLN(i);
         // stop actuators for that shoe
         setActuator((i == 0) ? HW_MOTOR_PIN_0 : HW_MOTOR_PIN_1, false);
-        setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, false);
+        setHeaterRelay(i, false); // Heater uses relay control
         g_motorActive[i] = false;
         // notify FSM to advance the sub: SubStart is the normal internal event
         // used to advance a sub-FSM from S_WET -> S_COOLING (or the next state).
@@ -137,7 +144,7 @@ static void motorTask(void * /*pv*/) {
         g_motorOn[i] = false;
         g_heaterOn[i] = false;
         g_motorTargetDuty[i] = 0;
-        setActuator((i == 0) ? HW_HEATER_PIN_0 : HW_HEATER_PIN_1, false);
+        setHeaterRelay(i, false); // Heater uses relay control
         g_motorActive[i] = false;
         g_motorStartMs[i] = 0;
         // Optionally notify FSM about forced stop (use Reset or Error if desired). For now just

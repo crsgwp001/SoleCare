@@ -1,4 +1,4 @@
-// tskUV.cpp - UV task implementation
+// tskUV.cpp - UV task implementation (now using PWM for MOSFET control)
 #include "tskUV.h"
 #include "tskFSM.h"
 #include "config.h"
@@ -10,8 +10,14 @@
 // hardware configuration (moved to include/config.h)
 static constexpr int UV_PIN_0 = HW_UV_PIN_0;
 static constexpr int UV_PIN_1 = HW_UV_PIN_1;
-static constexpr bool RELAY_ACTIVE_LOW = HW_RELAY_ACTIVE_LOW;
 static constexpr uint32_t UV_DEFAULT_MS = HW_UV_DEFAULT_MS;
+
+// UV now uses PWM for MOSFET control
+static const int UV_PWM_FREQ = 5000; // Hz
+static const int UV_PWM_RES = 9;     // bits
+static const int UV_PWM_MAX = (1 << UV_PWM_RES) - 1;
+static const int UV_PWM_TARGET = UV_PWM_MAX; // 100% duty for UV
+static const uint8_t UV_PWM_CH[2] = {2, 3}; // PWM channels 2 and 3 for UV
 
 enum class UVCmd : uint8_t { Start = 0, Stop = 1 };
 struct UVMsg {
@@ -29,16 +35,22 @@ static volatile uint32_t g_uvEndMs[2] = {0, 0};
 static volatile uint32_t g_uvRemainingMs[2] = {0, 0};
 static portMUX_TYPE g_uvMux = portMUX_INITIALIZER_UNLOCKED;
 
-static inline void setRelay(uint8_t idx, bool on) {
-  const int pin = (idx == 0) ? UV_PIN_0 : UV_PIN_1;
-  digitalWrite(pin, (RELAY_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
+static inline void setUVPWM(uint8_t idx, int duty) {
+  if (idx > 1)
+    return;
+  ledcWrite(UV_PWM_CH[idx], duty);
 }
 
 static void uvTask(void * /*pv*/) {
-  pinMode(UV_PIN_0, OUTPUT);
-  pinMode(UV_PIN_1, OUTPUT);
-  setRelay(0, false);
-  setRelay(1, false);
+  // Configure LEDC PWM for UV MOSFETs
+  ledcSetup(UV_PWM_CH[0], UV_PWM_FREQ, UV_PWM_RES);
+  ledcAttachPin(UV_PIN_0, UV_PWM_CH[0]);
+  ledcSetup(UV_PWM_CH[1], UV_PWM_FREQ, UV_PWM_RES);
+  ledcAttachPin(UV_PIN_1, UV_PWM_CH[1]);
+  
+  // Start with UV off
+  setUVPWM(0, 0);
+  setUVPWM(1, 0);
 
   UVMsg msg;
   for (;;) {
@@ -51,7 +63,7 @@ static void uvTask(void * /*pv*/) {
         g_uvRemainingMs[i] = (msg.durationMs ? msg.durationMs : UV_DEFAULT_MS);
         g_uvEndMs[i] = millis() + g_uvRemainingMs[i];
         taskEXIT_CRITICAL(&g_uvMux);
-        setRelay(i, true);
+        setUVPWM(i, UV_PWM_TARGET); // Turn on UV with PWM
       } else {
         // Stop: clear all state and notify
         taskENTER_CRITICAL(&g_uvMux);
@@ -60,7 +72,7 @@ static void uvTask(void * /*pv*/) {
         g_uvEndMs[i] = 0;
         g_uvRemainingMs[i] = 0;
         taskEXIT_CRITICAL(&g_uvMux);
-        setRelay(i, false);
+        setUVPWM(i, 0); // Turn off UV
         fsmExternalPost(i == 0 ? Event::UVTimer0 : Event::UVTimer1);
       }
     }
@@ -78,7 +90,7 @@ static void uvTask(void * /*pv*/) {
       }
       taskEXIT_CRITICAL(&g_uvMux);
       if (expired) {
-        setRelay(i, false);
+        setUVPWM(i, 0); // Turn off UV
         fsmExternalPost(i == 0 ? Event::UVTimer0 : Event::UVTimer1);
       }
     }
@@ -140,14 +152,14 @@ bool uvPause(uint8_t idx) {
       g_uvRemainingMs[idx] = 0;
       // We'll post the UVTimer event so FSM can handle expiry deterministically
       taskEXIT_CRITICAL(&g_uvMux);
-      setRelay(idx, false);
+      setUVPWM(idx, 0); // Turn off UV
       fsmExternalPost(idx == 0 ? Event::UVTimer0 : Event::UVTimer1);
       return false;
     }
   }
   taskEXIT_CRITICAL(&g_uvMux);
   if (ok)
-    setRelay(idx, false);
+    setUVPWM(idx, 0); // Turn off UV when paused
   return ok;
 }
 
@@ -168,14 +180,14 @@ bool uvResume(uint8_t idx) {
       g_uvEndMs[idx] = 0;
       g_uvRemainingMs[idx] = 0;
       taskEXIT_CRITICAL(&g_uvMux);
-      setRelay(idx, false);
+      setUVPWM(idx, 0); // Turn off UV
       fsmExternalPost(idx == 0 ? Event::UVTimer0 : Event::UVTimer1);
       return false;
     }
   }
   taskEXIT_CRITICAL(&g_uvMux);
   if (ok)
-    setRelay(idx, true);
+    setUVPWM(idx, UV_PWM_TARGET); // Turn on UV when resumed
   return ok;
 }
 
