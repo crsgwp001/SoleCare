@@ -9,11 +9,12 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 
-enum class MotorCmd : uint8_t { Start = 0, Stop = 1, Run = 2, Heater = 3 };
+enum class MotorCmd : uint8_t { Start = 0, Stop = 1, Heater = 2, SetDutyPct = 3 };
 struct MotorMsg {
   MotorCmd cmd;
   uint8_t idx;
   bool on;
+  int value; // duty percent when SetDutyPct
 };
 
 static QueueHandle_t g_motorQ = nullptr;
@@ -27,8 +28,8 @@ static volatile uint32_t g_motorStartMs[2] = {0, 0};
 static const int MOTOR_PWM_FREQ = 5000; // Hz
 static const int MOTOR_PWM_RES = 9;    // bits
 static const int MOTOR_PWM_MAX = (1 << MOTOR_PWM_RES) - 1;
-static const int MOTOR_PWM_TARGET = MOTOR_PWM_MAX * 4 / 5; // 80%
-static const int MOTOR_PWM_STEP = 16; // duty step per loop (rough ramp)
+static const int MOTOR_PWM_TARGET = MOTOR_PWM_MAX;
+static const int MOTOR_PWM_STEP = 16;
 static const uint8_t MOTOR_PWM_CH[2] = {0, 1};
 
 static volatile int g_motorDuty[2] = {0, 0};
@@ -78,77 +79,73 @@ static void motorTask(void * /*pv*/) {
       case MotorCmd::Start:
         g_motorActive[i] = true;
         g_motorStartMs[i] = millis();
-        // enable motor + heater for this shoe while active
         g_motorOn[i] = true;
         g_heaterOn[i] = true;
-        // ramp to 50% target
         g_motorTargetDuty[i] = MOTOR_PWM_TARGET;
-        // ensure PWM channel updated immediately
         setMotorPWM(i, g_motorDuty[i]);
-        setHeaterRelay(i, true); // Heater uses relay control
+        setHeaterRelay(i, true);
         DEV_DBG_PRINT("MOTOR: started for idx=");
         DEV_DBG_PRINTLN(i);
         break;
       case MotorCmd::Stop:
-        // disable actuators and mark inactive
         g_motorOn[i] = false;
         g_heaterOn[i] = false;
-        // ramp down to 0 and detach PWM channel
         g_motorTargetDuty[i] = 0;
-        setHeaterRelay(i, false); // Heater uses relay control
+        setHeaterRelay(i, false);
         g_motorActive[i] = false;
         g_motorStartMs[i] = 0;
         DEV_DBG_PRINT("MOTOR: stopped for idx=");
         DEV_DBG_PRINTLN(i);
         break;
-      case MotorCmd::Run:
-        g_motorOn[i] = msg.on;
-        g_motorTargetDuty[i] = msg.on ? MOTOR_PWM_TARGET : 0;
-        // ensure PWM updated next loop
-        DEV_DBG_PRINT("MOTOR: set motor on=");
-        DEV_DBG_PRINTLN(msg.on);
-        break;
       case MotorCmd::Heater:
         g_heaterOn[i] = msg.on;
-        setHeaterRelay(i, msg.on); // Heater uses relay control
+        setHeaterRelay(i, msg.on);
         DEV_DBG_PRINT("MOTOR: set heater on=");
         DEV_DBG_PRINTLN(msg.on);
         break;
+      case MotorCmd::SetDutyPct: {
+        int pct = msg.value;
+        if (pct < 0)
+          pct = 0;
+        if (pct > 100)
+          pct = 100;
+        int tgt = (MOTOR_PWM_MAX * pct) / 100;
+        g_motorTargetDuty[i] = tgt;
+        DEV_DBG_PRINT("MOTOR: set duty %=");
+        DEV_DBG_PRINTLN(pct);
+        break;
+      }
       }
     }
 
-    // If a motor is active, check its sensor diff condition
+    // Check sensor conditions and timeouts
     for (int i = 0; i < 2; ++i) {
       if (!g_motorActive[i])
         continue;
-      // g_dhtAHDiff holds differences sensor1-0 (idx0) and sensor2-0 (idx1)
+      
+      // Dry threshold: when sensor reads dry, advance WET->COOLING
       float diff = g_dhtAHDiff[i];
-      // If the diff has dropped below DRY threshold (i.e., we are now dry), advance the sub
       if (diff < AH_DRY_THRESHOLD) {
-        DEV_DBG_PRINT("MOTOR: threshold reached for idx=");
+        DEV_DBG_PRINT("MOTOR: dry threshold reached for idx=");
         DEV_DBG_PRINTLN(i);
-        // stop actuators for that shoe
-        setActuator((i == 0) ? HW_MOTOR_PIN_0 : HW_MOTOR_PIN_1, false);
-        setHeaterRelay(i, false); // Heater uses relay control
-        g_motorActive[i] = false;
-        // notify FSM to advance the sub: SubStart is the normal internal event
-        // used to advance a sub-FSM from S_WET -> S_COOLING (or the next state).
+        // Don't stop motor/heater here - let COOLING state handle it
+        // Just post event to advance to COOLING
         fsmExternalPost(Event::SubStart);
+        g_motorActive[i] = false; // Clear flag to avoid repeated posts
       }
-      // Enforce motor safety timeout
+      
+      // Safety timeout: force advance WET->COOLING after MOTOR_SAFETY_MS
       if (g_motorActive[i] && g_motorStartMs[i] != 0 &&
           (uint32_t)(millis() - g_motorStartMs[i]) >= MOTOR_SAFETY_MS) {
-        DEV_DBG_PRINT("MOTOR: safety timeout reached - forcing stop for idx=");
+        DEV_DBG_PRINT("MOTOR: safety timeout for idx=");
         DEV_DBG_PRINTLN(i);
-        // stop actuators and mark inactive
         g_motorOn[i] = false;
         g_heaterOn[i] = false;
         g_motorTargetDuty[i] = 0;
-        setHeaterRelay(i, false); // Heater uses relay control
+        setHeaterRelay(i, false);
         g_motorActive[i] = false;
         g_motorStartMs[i] = 0;
-        // Optionally notify FSM about forced stop (use Reset or Error if desired). For now just
-        // log.
+        fsmExternalPost(Event::SubStart);
       }
     }
 
@@ -184,26 +181,28 @@ bool motorInit() {
 bool motorStart(uint8_t idx) {
   if (!g_motorQ)
     return false;
-  MotorMsg m{MotorCmd::Start, idx, false};
+  MotorMsg m{MotorCmd::Start, idx, false, 0};
   return xQueueSend(g_motorQ, &m, 0) == pdTRUE;
 }
 bool motorStop(uint8_t idx) {
   if (!g_motorQ)
     return false;
-  MotorMsg m{MotorCmd::Stop, idx, false};
+  MotorMsg m{MotorCmd::Stop, idx, false, 0};
   return xQueueSend(g_motorQ, &m, 0) == pdTRUE;
 }
 
-bool motorRun(uint8_t idx, bool on) {
-  if (!g_motorQ)
-    return false;
-  MotorMsg m{MotorCmd::Run, idx, on};
-  return xQueueSend(g_motorQ, &m, 0) == pdTRUE;
-}
+
 bool heaterRun(uint8_t idx, bool on) {
   if (!g_motorQ)
     return false;
-  MotorMsg m{MotorCmd::Heater, idx, on};
+  MotorMsg m{MotorCmd::Heater, idx, on, 0};
+  return xQueueSend(g_motorQ, &m, 0) == pdTRUE;
+}
+
+bool motorSetDutyPercent(uint8_t idx, int percent) {
+  if (!g_motorQ)
+    return false;
+  MotorMsg m{MotorCmd::SetDutyPct, idx, false, percent};
   return xQueueSend(g_motorQ, &m, 0) == pdTRUE;
 }
 

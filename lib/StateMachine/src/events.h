@@ -40,7 +40,7 @@ enum class GlobalState : uint8_t {
 };
 
 // Sub-FSM states
-enum class SubState : uint8_t { S_IDLE, S_WET, S_COOLING, S_DRY, S_DONE };
+enum class SubState : uint8_t { S_IDLE, S_WAITING, S_WET, S_COOLING, S_DRY, S_DONE };
 
 constexpr uint8_t NUM_GLOBAL_STATES = static_cast<uint8_t>(GlobalState::Count);
 constexpr uint32_t ALL_STATE_BITS = (1UL << NUM_GLOBAL_STATES) - 1;

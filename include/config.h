@@ -2,8 +2,8 @@
 #include <cstdint>
 
 // ==================== SENSOR THRESHOLDS ====================
-constexpr float AH_WET_THRESHOLD = 1.0f;
-constexpr float AH_DRY_THRESHOLD = -1.0f;
+constexpr float AH_WET_THRESHOLD = 1.0f;   // Shoe is wet when AH diff > this value
+constexpr float AH_DRY_THRESHOLD = 1.0f;   // Shoe is dry when AH diff < this value (tunable)
 constexpr float EMA_ALPHA = 0.2f;
 constexpr float AMB_AH_OFFSET = 0.0f;
 
@@ -11,8 +11,10 @@ constexpr float AMB_AH_OFFSET = 0.0f;
 constexpr uint32_t DONE_TIMEOUT_MS = 10u * 1000u;
 constexpr uint32_t WET_TIMEOUT_MS = 5u * 1000u;
 constexpr uint32_t DRY_COOL_MS = 5u * 1000u;
-constexpr uint32_t MOTOR_SAFETY_MS = 120u * 1000u;
+constexpr uint32_t DRY_STABILIZE_MS = 5u * 1000u;
+constexpr uint32_t MOTOR_SAFETY_MS = 180u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
+constexpr uint32_t HEATER_WARMUP_MS = 5u * 1000u;
 
 // ==================== GPIO PINS ====================
 // Sensors
@@ -51,7 +53,7 @@ constexpr bool HW_ACTUATOR_ACTIVE_LOW = false;
 constexpr float BATTERY_R1 = 33000.0f;
 constexpr float BATTERY_R2 = 10000.0f;
 constexpr float BATTERY_VFS = 3.28f;
-constexpr float BATTERY_LOW_THRESHOLD = 3.0f;
-constexpr float BATTERY_RECOVERY_THRESHOLD = 3.2f;
+constexpr float BATTERY_LOW_THRESHOLD = 10.0f;
+constexpr float BATTERY_RECOVERY_THRESHOLD = 10.8f;
 constexpr int BATTERY_ADC_SAMPLES = 32;
 constexpr uint32_t BATTERY_CHECK_INTERVAL_MS = 1000u;

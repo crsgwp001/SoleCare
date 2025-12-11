@@ -11,8 +11,9 @@ bool motorStart(uint8_t idx);
 bool motorStop(uint8_t idx);
 
 // Low-level actuator control (thread-safe commands)
-bool motorRun(uint8_t idx, bool on);
 bool heaterRun(uint8_t idx, bool on);
+// Adjust motor target duty cycle (percent 0-100)
+bool motorSetDutyPercent(uint8_t idx, int percent);
 
 // Timing helpers: return milliseconds since the shoe was started (0 if not active)
 uint32_t motorActiveMs(uint8_t idx);
