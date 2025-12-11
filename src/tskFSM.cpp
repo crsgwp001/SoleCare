@@ -659,6 +659,7 @@ static void setupStateMachines() {
 
   // Idle state: status LED on, error LED off
   fsmGlobal.setEntry(GlobalState::Idle, []() {
+    detectingStartMs = 0;  // Clear detecting timer to prevent stale timeout
     digitalWrite(HW_STATUS_LED_PIN, HIGH);
     digitalWrite(HW_ERROR_LED_PIN, LOW);
   });

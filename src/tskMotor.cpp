@@ -48,6 +48,7 @@ bool g_pidInitialized[2] = {false, false};  // Track PID init per shoe
 
 static float g_lastAH[2] = {0.0f, 0.0f};           // For AH rate calculation
 static unsigned long g_lastAHTime[2] = {0, 0};     // Timestamp of last AH sample
+static unsigned long g_lastPidLogTime[2] = {0, 0}; // Throttle PID logging to every 5s
 
 static inline void setActuator(int pin, bool on) {
   digitalWrite(pin, (HW_ACTUATOR_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
@@ -149,8 +150,11 @@ static void motorTask(void * /*pv*/) {
           pct = 100;
         int tgt = (MOTOR_PWM_MAX * pct) / 100;
         g_motorTargetDuty[i] = tgt;
-        DEV_DBG_PRINT("MOTOR: set duty %=");
-        DEV_DBG_PRINTLN(pct);
+        // Only log significant duty changes (>5% change)
+        if (g_motorDuty[i] == 0 || abs(tgt - g_motorDuty[i]) > (MOTOR_PWM_MAX * 5 / 100)) {
+          DEV_DBG_PRINT("MOTOR: set duty %=");
+          DEV_DBG_PRINTLN(pct);
+        }
         break;
       }
       }
@@ -190,8 +194,12 @@ static void motorTask(void * /*pv*/) {
         
         motorSetDutyPercent(i, dutyPercent);
         
-        // Log PID data
-        pidLogData(i, ahRate, g_motorPID[i].getSetpoint(), pidOutput, dutyPercent);
+        // Log PID data throttled to every 5 seconds
+        unsigned long now = millis();
+        if (now - g_lastPidLogTime[i] >= 5000) {
+          pidLogData(i, ahRate, g_motorPID[i].getSetpoint(), pidOutput, dutyPercent);
+          g_lastPidLogTime[i] = now;
+        }
       }
     }
 

@@ -29,7 +29,7 @@ constexpr unsigned long PID_SAMPLE_MS = 2000;  // 2-second sample interval
 // Control parameters
 constexpr double TARGET_AH_RATE = 0.4;  // Target AH rate (g/m³/min) - Phase 1 fixed
 constexpr unsigned long PID_CONTROL_START_MS = 30000;  // Skip first 30s, use fixed 75%
-constexpr double PID_OUT_MIN = 0.3;     // Minimum duty (30%)
+constexpr double PID_OUT_MIN = 0.5;     // Minimum duty (50%) - increased from 30%
 constexpr double PID_OUT_MAX = 1.0;     // Maximum duty (100%)
 constexpr int PID_FIXED_DUTY_PERCENT = 75;  // Fixed duty during warmup phase
 
