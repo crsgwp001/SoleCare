@@ -4,8 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## v1.1.0 - (2025-12-12)
 
+⚠️ **RELEASE STATUS**: Functional build with FSM redesign complete. **PID control NOT YET PRODUCTION-READY** — heavy tuning required on gains (Kp, Ki, Kd) and setpoint. Recommend testing with actual shoe loads and monitoring CSV logs to characterize system response before field deployment.
+
 Highlights
-- **PID Phase 1**: Proportional + Integral motor control (Kp=0.2, Ki=0.05, Kd=0) with smooth 50-100% adaptive duty modulation. Fixed 30s warmup at 75%, then adaptive control targeting 0.4 g/m³/min AH rate. 2-second sample interval with CSV logging (5s throttle).
+- **PID Phase 1 (EXPERIMENTAL)**: Proportional + Integral motor control (Kp=0.2, Ki=0.05, Kd=0) with smooth 50-100% adaptive duty modulation. Fixed 30s warmup at 75%, then adaptive control targeting 0.4 g/m³/min AH rate. 2-second sample interval with CSV logging (5s throttle). ⚠️ Gains are placeholder values — requires characterization and tuning against real system dynamics.
 - **Smart WET Exit**: Replaced rigid 5-second timeout with AH acceleration detection (peak evaporation). Subs now exit WET dynamically (30-600s range) based on actual moisture removal curve. Requires 30s warmup to prevent false positives.
 - **Hysteresis Thresholds**: WET=1.0f, DRY=0.5f thresholds with 0.5 unit gap prevent state bouncing between WAITING/WET/COOLING. Eliminates rapid oscillation on borderline humidity.
 - **FSM Redesign**: Global Idle fully resets hardware and substates. Done entry no longer pre-resets subs (they stay in final state until explicit reset). StartPressed gated to Idle/Checking only. Auto-reset broadcasts to global FSM only, not substates. Substate reset via ResetPressed event.
@@ -31,11 +33,13 @@ Testing checklist
 7. Dual-shoe parallel: Both shoes drying simultaneously in DRY/DONE while heater runs sequentially in WET.
 
 Known Limitations (Phase 1)
+- ⚠️ **PID NOT TUNED FOR PRODUCTION**: Kp=0.2, Ki=0.05, Kd=0 are placeholder gains. System response unknown without characterization testing. Expect overshoot, undershoot, oscillation, or sluggish response depending on actual shoe moisture mass and heater/motor dynamics. CSV logs essential for tuning.
 - No Phase 2 dual-setpoint switching (aggressive evaporation → gentle stabilization)
 - Ki term minimal (only 0.05) for gradual convergence
 - Kd disabled (0.0) - no derivative responsiveness
 - Fixed thresholds - no learning or adaptation
 - AH rates from single 2s samples, no history buffer
+- Setpoint fixed at 0.4 g/m³/min (no adaptive tuning)
 
 ## v0.1.12-rc1 - (2025-12-10)
 
