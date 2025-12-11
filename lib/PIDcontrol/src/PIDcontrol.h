@@ -17,6 +17,7 @@ public:
   void setSetpoint(double sp);
   double compute(double input); // call regularly; returns current output (normalized)
   double getOutput() const;
+  double getSetpoint() const { return setpoint_; }  // Get current setpoint for logging
 
   // Utility
   void reset();

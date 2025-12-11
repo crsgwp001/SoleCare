@@ -4,6 +4,8 @@
 #include "global.h"
 #include "dev_debug.h"
 #include "tskFSM.h"
+#include "PIDcontrol.h"
+#include "pidLog.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -35,6 +37,18 @@ static const uint8_t MOTOR_PWM_CH[2] = {0, 1};
 static volatile int g_motorDuty[2] = {0, 0};
 static volatile int g_motorTargetDuty[2] = {0, 0};
 
+// ==================== PID MOTOR CONTROL ====================
+// Non-static to allow external linkage (used by tskFSM.cpp)
+PIDcontrol g_motorPID[2] = {
+  PIDcontrol(PID_KP, PID_KI, PID_KD, PID_SAMPLE_MS),
+  PIDcontrol(PID_KP, PID_KI, PID_KD, PID_SAMPLE_MS)
+};
+
+bool g_pidInitialized[2] = {false, false};  // Track PID init per shoe
+
+static float g_lastAH[2] = {0.0f, 0.0f};           // For AH rate calculation
+static unsigned long g_lastAHTime[2] = {0, 0};     // Timestamp of last AH sample
+
 static inline void setActuator(int pin, bool on) {
   digitalWrite(pin, (HW_ACTUATOR_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
 }
@@ -50,6 +64,30 @@ static inline void setMotorPWM(uint8_t idx, int duty) {
     return;
   ledcWrite(MOTOR_PWM_CH[idx], duty);
   g_motorDuty[idx] = duty;
+}
+
+// Calculate AH rate-of-change in g/m³/min
+static float calculateAHRate(uint8_t idx) {
+  float currentAH = g_dhtAH_ema[idx + 1];  // idx+1 because sensor 0 is ambient
+  unsigned long now = millis();
+  
+  // First call or not enough time passed
+  if (g_lastAHTime[idx] == 0) {
+    g_lastAH[idx] = currentAH;
+    g_lastAHTime[idx] = now;
+    return 0.0f;
+  }
+  
+  unsigned long dt = now - g_lastAHTime[idx];
+  if (dt < 1000) return 0.0f;  // Need at least 1 second between samples
+  
+  float ahDelta = currentAH - g_lastAH[idx];
+  float ratePerMin = (ahDelta / (dt / 1000.0f)) * 60.0f;
+  
+  g_lastAH[idx] = currentAH;
+  g_lastAHTime[idx] = now;
+  
+  return ratePerMin;
 }
 
 static void motorTask(void * /*pv*/) {
@@ -118,6 +156,45 @@ static void motorTask(void * /*pv*/) {
       }
     }
 
+    // ==================== PID MOTOR CONTROL ====================
+    for (int i = 0; i < 2; ++i) {
+      if (!g_motorActive[i])
+        continue;
+        
+      unsigned long wetElapsed = millis() - g_motorStartMs[i];
+      
+      if (wetElapsed < PID_CONTROL_START_MS) {
+        // Phase 1: Warmup/initial phase - fixed duty percent
+        motorSetDutyPercent(i, PID_FIXED_DUTY_PERCENT);
+      } else {
+        // Phase 2: PID control based on AH rate-of-change
+        
+        // Initialize PID on first run in this phase
+        if (!g_pidInitialized[i]) {
+          g_motorPID[i].setMode(PIDcontrol::AUTOMATIC);
+          g_pidInitialized[i] = true;
+          DEV_DBG_PRINT("PID: activated for shoe ");
+          DEV_DBG_PRINTLN(i);
+        }
+        
+        // Calculate current AH rate
+        float ahRate = calculateAHRate(i);
+        
+        // Compute PID output (normalized 0.0-1.0)
+        double pidOutput = g_motorPID[i].compute(ahRate);
+        
+        // Convert to duty percent (30-100%)
+        int dutyPercent = (int)(pidOutput * 100.0);
+        if (dutyPercent < 30) dutyPercent = 30;
+        if (dutyPercent > 100) dutyPercent = 100;
+        
+        motorSetDutyPercent(i, dutyPercent);
+        
+        // Log PID data
+        pidLogData(i, ahRate, g_motorPID[i].getSetpoint(), pidOutput, dutyPercent);
+      }
+    }
+
     // Check sensor conditions and timeouts
     for (int i = 0; i < 2; ++i) {
       if (!g_motorActive[i])
@@ -176,6 +253,17 @@ bool motorInit() {
   g_motorQ = xQueueCreate(8, sizeof(MotorMsg));
   if (!g_motorQ)
     return false;
+  
+  // Initialize PID controllers for motor control
+  for (int i = 0; i < 2; i++) {
+    g_motorPID[i].setOutputLimits(PID_OUT_MIN, PID_OUT_MAX);
+    g_motorPID[i].setSampleTime(PID_SAMPLE_MS);
+    g_motorPID[i].setSetpoint(TARGET_AH_RATE);
+    g_motorPID[i].setMode(PIDcontrol::MANUAL);  // Start in MANUAL
+  }
+  
+  pidLogInit();  // Initialize PID logging
+  
   return xTaskCreatePinnedToCore(motorTask, "MotorTask", 4096, nullptr, 2, nullptr, 1) == pdPASS;
 }
 bool motorStart(uint8_t idx) {

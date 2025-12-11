@@ -3,11 +3,16 @@
 #include "fsm_debug.h"
 #include "tskMotor.h"
 #include "tskUV.h"
+#include "PIDcontrol.h"
 #include <Arduino.h>
 #include <events.h>
 #include <StateMachine.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+
+// External PID control globals (defined in tskMotor.cpp)
+extern PIDcontrol g_motorPID[2];
+extern bool g_pidInitialized[2];
 
 // Button definitions (configurable in include/config.h)
 static constexpr int START_PIN = HW_START_PIN;
@@ -298,7 +303,11 @@ static void setupStateMachines() {
          heaterRun(0, true);
          g_subWetStartMs[0] = millis();
        },
-       nullptr},
+       []() {
+         FSM_DBG_PRINTLN("SUB1 EXIT: WET -> resetting PID");
+         g_pidInitialized[0] = false;
+         g_motorPID[0].reset();
+       }},
       // S_COOLING: heater off, motor continues; start cooling timer
       {SubState::S_COOLING,
        []() {
@@ -356,7 +365,11 @@ static void setupStateMachines() {
          heaterRun(1, true);
          g_subWetStartMs[1] = millis();
        },
-       nullptr},
+       []() {
+         FSM_DBG_PRINTLN("SUB2 EXIT: WET -> resetting PID");
+         g_pidInitialized[1] = false;
+         g_motorPID[1].reset();
+       }},
       {SubState::S_COOLING,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING");

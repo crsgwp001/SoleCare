@@ -16,6 +16,29 @@ constexpr uint32_t MOTOR_SAFETY_MS = 180u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
 constexpr uint32_t HEATER_WARMUP_MS = 5u * 1000u;
 
+// ==================== PID MOTOR CONTROL ====================
+// Phase 1: P-only control with fixed setpoint and logging
+#define PID_LOGGING_ENABLED 1  // Toggle PID logging on/off (0 = disabled, 1 = enabled)
+
+// P-only tuning (Phase 1)
+constexpr double PID_KP = 5.0;          // Proportional gain (conservative)
+constexpr double PID_KI = 0.0;          // Integral gain (disabled for Phase 1)
+constexpr double PID_KD = 0.0;          // Derivative gain (disabled for Phase 1)
+constexpr unsigned long PID_SAMPLE_MS = 2000;  // 2-second sample interval
+
+// Control parameters
+constexpr double TARGET_AH_RATE = 0.4;  // Target AH rate (g/m³/min) - Phase 1 fixed
+constexpr unsigned long PID_CONTROL_START_MS = 30000;  // Skip first 30s, use fixed 75%
+constexpr double PID_OUT_MIN = 0.3;     // Minimum duty (30%)
+constexpr double PID_OUT_MAX = 1.0;     // Maximum duty (100%)
+constexpr int PID_FIXED_DUTY_PERCENT = 75;  // Fixed duty during warmup phase
+
+// Phase 2: Dual-phase setpoint switching (ready for implementation)
+// Uncomment and modify when ready to implement Phase 2
+// constexpr double TARGET_AH_RATE_EVAP = 0.4;    // Phase 2A: Aggressive evaporation
+// constexpr double TARGET_AH_RATE_STABLE = -0.1; // Phase 2B: Gentle stabilization
+// constexpr double AH_RATE_PHASE_THRESHOLD = 0.1; // Threshold to switch phases
+
 // ==================== GPIO PINS ====================
 // Sensors
 constexpr int HW_DHT_PIN_0 = 17;
