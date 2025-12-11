@@ -53,6 +53,14 @@ static uint32_t g_subWetStartMs[2] = {0, 0};
 static uint32_t g_subCoolingStartMs[2] = {0, 0};
 static uint32_t g_subCoolingStabilizeStartMs[2] = {0, 0};
 static bool g_coolingLocked[2] = {false, false};
+
+// Track AH rate-of-change during WET to detect peak evaporation
+// Used to exit WET state when drying rate starts declining
+static float g_prevAHRate[2] = {0.0f, 0.0f};  // Previous AH rate-of-change sample
+static uint32_t g_lastAHRateSampleMs[2] = {0, 0};  // Timestamp of last sample
+static int g_ahRateSampleCount[2] = {0, 0};  // Number of samples collected
+constexpr int MIN_AH_RATE_SAMPLES = 3;  // Need at least this many samples before checking decline
+constexpr float AH_RATE_DECLINE_THRESHOLD = -0.01f;  // Rate-of-change decline to trigger exit (g/m³/min²)
 // Track whether the UV timer expired while the sub was in the COOLING phase.
 static bool g_uvExpiredDuringCooling[2] = {false, false};
 // UV complete flag: set when a UV timer has finished for a sub. Prevents
@@ -304,9 +312,14 @@ static void setupStateMachines() {
          g_subWetStartMs[0] = millis();
        },
        []() {
-         FSM_DBG_PRINTLN("SUB1 EXIT: WET -> resetting PID");
+         FSM_DBG_PRINTLN("SUB1 EXIT: WET -> resetting PID and releasing lock");
          g_pidInitialized[0] = false;
          g_motorPID[0].reset();
+         // Release WET lock since COOLING doesn't need it
+         if (g_wetLockOwner == 0) {
+           g_wetLockOwner = -1;
+           FSM_DBG_PRINTLN("SUB1: Released WET lock on exit to COOLING");
+         }
        }},
       // S_COOLING: heater off, motor continues; start cooling timer
       {SubState::S_COOLING,
@@ -366,9 +379,14 @@ static void setupStateMachines() {
          g_subWetStartMs[1] = millis();
        },
        []() {
-         FSM_DBG_PRINTLN("SUB2 EXIT: WET -> resetting PID");
+         FSM_DBG_PRINTLN("SUB2 EXIT: WET -> resetting PID and releasing lock");
          g_pidInitialized[1] = false;
          g_motorPID[1].reset();
+         // Release WET lock since COOLING doesn't need it
+         if (g_wetLockOwner == 1) {
+           g_wetLockOwner = -1;
+           FSM_DBG_PRINTLN("SUB2: Released WET lock on exit to COOLING");
+         }
        }},
       {SubState::S_COOLING,
        []() {
@@ -472,7 +490,7 @@ static void setupStateMachines() {
     }
   });
 
-  // S_WET run: start motor after heater warmup; progression driven by events (dry/safety)
+  // S_WET run: start motor after heater warmup; monitor AH rate-of-change to detect peak evaporation
   fsmSub1.setRun(SubState::S_WET, []() {
     if (!g_motorStarted[0] && g_subWetStartMs[0] != 0) {
       uint32_t elapsed = (uint32_t)(millis() - g_subWetStartMs[0]);
@@ -481,6 +499,41 @@ static void setupStateMachines() {
         motorStart(0);
         motorSetDutyPercent(0, 100);
         g_motorStarted[0] = true;
+        // Reset AH rate tracking when motor starts
+        g_ahRateSampleCount[0] = 0;
+        g_lastAHRateSampleMs[0] = millis();
+        g_prevAHRate[0] = 0.0f;
+      }
+    }
+    // Sample AH rate every 2 seconds and check for peak (declining rate)
+    // But wait AH_ACCEL_WARMUP_MS (30s) after WET start before checking for decline
+    if (g_motorStarted[0] && g_subWetStartMs[0] != 0) {
+      uint32_t now = millis();
+      uint32_t wetElapsed = (uint32_t)(now - g_subWetStartMs[0]);
+      
+      if ((uint32_t)(now - g_lastAHRateSampleMs[0]) >= 2000) {
+        g_lastAHRateSampleMs[0] = now;
+        float currentRate = g_dhtAHDiff[0];  // Current AH diff (proxy for evaporation rate)
+        
+        if (g_ahRateSampleCount[0] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
+          // Calculate rate-of-change (second derivative)
+          float rateChange = currentRate - g_prevAHRate[0];
+          FSM_DBG_PRINT("SUB1: WET AH diff=");
+          FSM_DBG_PRINT(currentRate);
+          FSM_DBG_PRINT(" prev=");
+          FSM_DBG_PRINT(g_prevAHRate[0]);
+          FSM_DBG_PRINT(" change=");
+          FSM_DBG_PRINTLN(rateChange);
+          
+          // Check if rate is declining after collecting enough samples
+          if (g_ahRateSampleCount[0] >= MIN_AH_RATE_SAMPLES && rateChange < AH_RATE_DECLINE_THRESHOLD) {
+            FSM_DBG_PRINTLN("SUB1: WET peak evaporation detected (declining rate) -> transition to COOLING");
+            fsmSub1.handleEvent(Event::SubStart);
+            g_ahRateSampleCount[0] = 0;  // Reset counter
+          }
+        }
+        g_prevAHRate[0] = currentRate;
+        g_ahRateSampleCount[0]++;
       }
     }
   });
@@ -492,6 +545,41 @@ static void setupStateMachines() {
         motorStart(1);
         motorSetDutyPercent(1, 100);
         g_motorStarted[1] = true;
+        // Reset AH rate tracking when motor starts
+        g_ahRateSampleCount[1] = 0;
+        g_lastAHRateSampleMs[1] = millis();
+        g_prevAHRate[1] = 0.0f;
+      }
+    }
+    // Sample AH rate every 2 seconds and check for peak (declining rate)
+    // But wait AH_ACCEL_WARMUP_MS (30s) after WET start before checking for decline
+    if (g_motorStarted[1] && g_subWetStartMs[1] != 0) {
+      uint32_t now = millis();
+      uint32_t wetElapsed = (uint32_t)(now - g_subWetStartMs[1]);
+      
+      if ((uint32_t)(now - g_lastAHRateSampleMs[1]) >= 2000) {
+        g_lastAHRateSampleMs[1] = now;
+        float currentRate = g_dhtAHDiff[1];  // Current AH diff (proxy for evaporation rate)
+        
+        if (g_ahRateSampleCount[1] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
+          // Calculate rate-of-change (second derivative)
+          float rateChange = currentRate - g_prevAHRate[1];
+          FSM_DBG_PRINT("SUB2: WET AH diff=");
+          FSM_DBG_PRINT(currentRate);
+          FSM_DBG_PRINT(" prev=");
+          FSM_DBG_PRINT(g_prevAHRate[1]);
+          FSM_DBG_PRINT(" change=");
+          FSM_DBG_PRINTLN(rateChange);
+          
+          // Check if rate is declining after collecting enough samples
+          if (g_ahRateSampleCount[1] >= MIN_AH_RATE_SAMPLES && rateChange < AH_RATE_DECLINE_THRESHOLD) {
+            FSM_DBG_PRINTLN("SUB2: WET peak evaporation detected (declining rate) -> transition to COOLING");
+            fsmSub2.handleEvent(Event::SubStart);
+            g_ahRateSampleCount[1] = 0;  // Reset counter
+          }
+        }
+        g_prevAHRate[1] = currentRate;
+        g_ahRateSampleCount[1]++;
       }
     }
   });
@@ -597,11 +685,10 @@ static void setupStateMachines() {
     detectingStartMs = 0;
     FSM_DBG_PRINTLN("GLOBAL EXIT: Detecting - equalize timer cleared");
   });
-  // Done entry: reset subs back to idle and stop UVs
+  // Done entry: stop UVs but keep subs in their final states (COOLING/DRY/etc)
+  // Subs will reset when user presses Start again (goes back to Idle first)
   fsmGlobal.setEntry(GlobalState::Done, []() {
-    FSM_DBG_PRINTLN("GLOBAL ENTRY: Done - resetting subs (local)");
-    fsmSub1.handleEvent(Event::ResetPressed);
-    fsmSub2.handleEvent(Event::ResetPressed);
+    FSM_DBG_PRINTLN("GLOBAL ENTRY: Done - stopping UVs");
     uvStop(0);
     uvStop(1);
     g_subDoneMask = 0;
@@ -660,6 +747,28 @@ static void setupStateMachines() {
   // Idle state: status LED on, error LED off
   fsmGlobal.setEntry(GlobalState::Idle, []() {
     detectingStartMs = 0;  // Clear detecting timer to prevent stale timeout
+    
+    // Full reset when entering Idle
+    FSM_DBG_PRINTLN("GLOBAL ENTRY: Idle - full reset");
+    
+    // Stop all motors, heaters, UVs
+    motorStop(0);
+    motorStop(1);
+    heaterRun(0, false);
+    heaterRun(1, false);
+    uvStop(0);
+    uvStop(1);
+    
+    // Reset WET lock
+    g_wetLockOwner = -1;
+    g_uvComplete[0] = g_uvComplete[1] = false;
+    g_motorStarted[0] = g_motorStarted[1] = false;
+    
+    // Reset substates to IDLE via ResetPressed event
+    fsmSub1.handleEvent(Event::ResetPressed);
+    fsmSub2.handleEvent(Event::ResetPressed);
+    
+    // LEDs: Status on (idle), Error off
     digitalWrite(HW_STATUS_LED_PIN, HIGH);
     digitalWrite(HW_ERROR_LED_PIN, LOW);
   });
@@ -720,10 +829,14 @@ static void vStateMachineTask(void * /*pvParameters*/) {
 
   while (true) {
     if (readStart()) {
-      if (fsmGlobal.getState() == GlobalState::Running)
-        fsmPostEvent(Event::SubStart, false);
-      else
-        fsmPostEvent(Event::StartPressed, false);
+      GlobalState gs = fsmGlobal.getState();
+      // Only allow start from Idle or Checking states
+      if (gs == GlobalState::Idle || gs == GlobalState::Checking) {
+        if (gs == GlobalState::Running)
+          fsmPostEvent(Event::SubStart, false);
+        else
+          fsmPostEvent(Event::StartPressed, false);
+      }
     }
     if (readReset())
       fsmPostEvent(Event::ResetPressed, true);
@@ -798,12 +911,13 @@ static void vStateMachineTask(void * /*pvParameters*/) {
         }
       }
     }
-    // Auto-reset: if we entered Done, after 60s reset to Idle
+    // Auto-reset: if we entered Done, after DONE_TIMEOUT_MS reset to Idle (global only, not subs)
     if (g_doneStartMs != 0) {
       uint32_t now = millis();
       if ((uint32_t)(now - g_doneStartMs) >= DONE_TIMEOUT_MS) {
-        FSM_DBG_PRINTLN("GLOBAL: Done timeout -> ResetPressed (auto)");
-        fsmPostEvent(Event::ResetPressed, /*broadcastAll=*/true);
+        FSM_DBG_PRINTLN("GLOBAL: Done timeout -> Reset to Idle (global only)");
+        // Post ResetPressed with broadcastAll=false to only reset global FSM
+        fsmPostEvent(Event::ResetPressed, /*broadcastAll=*/false);
         g_doneStartMs = 0;
       }
     }

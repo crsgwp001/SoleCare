@@ -2,34 +2,35 @@
 #include <cstdint>
 
 // ==================== SENSOR THRESHOLDS ====================
-constexpr float AH_WET_THRESHOLD = 1.0f;   // Shoe is wet when AH diff > this value
-constexpr float AH_DRY_THRESHOLD = 1.0f;   // Shoe is dry when AH diff < this value (tunable)
+constexpr float AH_WET_THRESHOLD = 1.0f;   // Shoe is wet when AH diff > this value (enter WET)
+constexpr float AH_DRY_THRESHOLD = 0.5f;   // Shoe is dry when AH diff < this value (exit COOLING to DRY, hysteresis from WET)
 constexpr float EMA_ALPHA = 0.2f;
 constexpr float AMB_AH_OFFSET = 0.0f;
 
 // ==================== TIMING ====================
 constexpr uint32_t DONE_TIMEOUT_MS = 10u * 1000u;
 constexpr uint32_t WET_TIMEOUT_MS = 5u * 1000u;
-constexpr uint32_t DRY_COOL_MS = 5u * 1000u;
-constexpr uint32_t DRY_STABILIZE_MS = 5u * 1000u;
-constexpr uint32_t MOTOR_SAFETY_MS = 180u * 1000u;
+constexpr uint32_t DRY_COOL_MS = 60u * 1000u;
+constexpr uint32_t DRY_STABILIZE_MS = 120u * 1000u;
+constexpr uint32_t MOTOR_SAFETY_MS = 600u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
 constexpr uint32_t HEATER_WARMUP_MS = 5u * 1000u;
+constexpr uint32_t AH_ACCEL_WARMUP_MS = 100u * 1000u;  // Wait 30s before checking AH acceleration for WET exit
 
 // ==================== PID MOTOR CONTROL ====================
 // Phase 1: P-only control with fixed setpoint and logging
 #define PID_LOGGING_ENABLED 1  // Toggle PID logging on/off (0 = disabled, 1 = enabled)
 
-// P-only tuning (Phase 1)
-constexpr double PID_KP = 5.0;          // Proportional gain (conservative)
-constexpr double PID_KI = 0.0;          // Integral gain (disabled for Phase 1)
+// P-only tuning (Phase 1) - tuned for smooth 50-100% output
+constexpr double PID_KP = 0.2;          // Proportional gain (reduced from 5.0 to avoid saturation)
+constexpr double PID_KI = 0.05;         // Integral gain (small, to help reach setpoint over time)
 constexpr double PID_KD = 0.0;          // Derivative gain (disabled for Phase 1)
 constexpr unsigned long PID_SAMPLE_MS = 2000;  // 2-second sample interval
 
 // Control parameters
 constexpr double TARGET_AH_RATE = 0.4;  // Target AH rate (g/m³/min) - Phase 1 fixed
 constexpr unsigned long PID_CONTROL_START_MS = 30000;  // Skip first 30s, use fixed 75%
-constexpr double PID_OUT_MIN = 0.5;     // Minimum duty (50%) - increased from 30%
+constexpr double PID_OUT_MIN = 0.5;     // Minimum duty (50%)
 constexpr double PID_OUT_MAX = 1.0;     // Maximum duty (100%)
 constexpr int PID_FIXED_DUTY_PERCENT = 75;  // Fixed duty during warmup phase
 
@@ -62,8 +63,8 @@ constexpr int HW_UV_PIN_0 = 14;
 constexpr int HW_UV_PIN_1 = 12;
 
 // LEDs
-constexpr int HW_STATUS_LED_PIN = 32;
-constexpr int HW_ERROR_LED_PIN = 33;
+constexpr int HW_STATUS_LED_PIN = 33;
+constexpr int HW_ERROR_LED_PIN = 32;
 
 // Battery
 constexpr int HW_BATTERY_ADC_PIN = 39;

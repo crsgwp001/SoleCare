@@ -57,7 +57,10 @@ double PIDcontrol::compute(double input) {
   double dInput = (input - lastInput_) / (dt / 1000.0);
   double D = -kd_ * dInput;
 
-  double out = P + integral_ + D;
+  // Output: start at midpoint, then apply PID corrections
+  double midpoint = (outMin_ + outMax_) / 2.0;
+  double range = outMax_ - outMin_;
+  double out = midpoint + (P + integral_ + D) * range / 2.0;
   out = clamp(out, outMin_, outMax_);
 
   // Save state

@@ -184,13 +184,11 @@ static void motorTask(void * /*pv*/) {
         // Calculate current AH rate
         float ahRate = calculateAHRate(i);
         
-        // Compute PID output (normalized 0.0-1.0)
+        // Compute PID output (already limited to PID_OUT_MIN-PID_OUT_MAX: 0.5-1.0)
         double pidOutput = g_motorPID[i].compute(ahRate);
         
-        // Convert to duty percent (30-100%)
-        int dutyPercent = (int)(pidOutput * 100.0);
-        if (dutyPercent < 30) dutyPercent = 30;
-        if (dutyPercent > 100) dutyPercent = 100;
+        // Convert to duty percent (pidOutput is 0.5-1.0, so multiply by 100 for 50-100%)
+        int dutyPercent = (int)round(pidOutput * 100.0);
         
         motorSetDutyPercent(i, dutyPercent);
         
