@@ -48,7 +48,6 @@ bool g_pidInitialized[2] = {false, false};  // Track PID init per shoe
 
 static float g_lastAH[2] = {0.0f, 0.0f};           // For AH rate calculation
 static unsigned long g_lastAHTime[2] = {0, 0};     // Timestamp of last AH sample
-static unsigned long g_lastPidLogTime[2] = {0, 0}; // Throttle PID logging to every 5s
 
 static inline void setActuator(int pin, bool on) {
   digitalWrite(pin, (HW_ACTUATOR_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
@@ -161,6 +160,10 @@ static void motorTask(void * /*pv*/) {
     }
 
     // ==================== PID MOTOR CONTROL ====================
+    // Storage for PID outputs (updated per shoe below)
+    static float ahRates[2] = {0.0f, 0.0f};
+    static double pidOutputs[2] = {0.5, 0.5};  // Default to midpoint
+    
     for (int i = 0; i < 2; ++i) {
       if (!g_motorActive[i])
         continue;
@@ -170,6 +173,8 @@ static void motorTask(void * /*pv*/) {
       if (wetElapsed < PID_CONTROL_START_MS) {
         // Phase 1: Warmup/initial phase - fixed duty percent
         motorSetDutyPercent(i, PID_FIXED_DUTY_PERCENT);
+        pidOutputs[i] = PID_FIXED_DUTY_PERCENT / 100.0;  // Store for logging
+        ahRates[i] = 0.0f;  // No rate tracking during warmup
       } else {
         // Phase 2: PID control based on AH rate-of-change
         
@@ -182,22 +187,34 @@ static void motorTask(void * /*pv*/) {
         }
         
         // Calculate current AH rate
-        float ahRate = calculateAHRate(i);
+        ahRates[i] = calculateAHRate(i);
         
         // Compute PID output (already limited to PID_OUT_MIN-PID_OUT_MAX: 0.5-1.0)
-        double pidOutput = g_motorPID[i].compute(ahRate);
+        pidOutputs[i] = g_motorPID[i].compute(ahRates[i]);
         
         // Convert to duty percent (pidOutput is 0.5-1.0, so multiply by 100 for 50-100%)
-        int dutyPercent = (int)round(pidOutput * 100.0);
+        int dutyPercent = (int)round(pidOutputs[i] * 100.0);
         
         motorSetDutyPercent(i, dutyPercent);
+      }
+    }
+    
+    // ==================== CONSOLIDATED PID LOGGING (every 2 seconds) ====================
+    {
+      static unsigned long lastLogMs = 0;
+      unsigned long now = millis();
+      if (now - lastLogMs >= 2000) {  // 2-second interval
+        // Get current shoe states
+        SubState sub0State = getSub1State();
+        SubState sub1State = getSub2State();
         
-        // Log PID data throttled to every 5 seconds
-        unsigned long now = millis();
-        if (now - g_lastPidLogTime[i] >= 5000) {
-          pidLogData(i, ahRate, g_motorPID[i].getSetpoint(), pidOutput, dutyPercent);
-          g_lastPidLogTime[i] = now;
-        }
+        // Log comprehensive data: AH values, diffs, states, rates, PID outputs
+        pidLogData(
+          g_dhtAH_ema[0], g_dhtAH_ema[1], g_dhtAH_ema[2],       // AH0, AH1, AH2
+          g_dhtAHDiff_ema[0], sub0State, ahRates[0], pidOutputs[0] * 100.0,  // Shoe 0
+          g_dhtAHDiff_ema[1], sub1State, ahRates[1], pidOutputs[1] * 100.0   // Shoe 1
+        );
+        lastLogMs = now;
       }
     }
 
