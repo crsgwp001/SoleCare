@@ -50,10 +50,19 @@ static void vSensorTask(void * /*pvParameters*/) {
       }
     }
 
-    // 3) Compute raw diff (no EMA) + status
+    // 3) Compute raw diff + EMA diff + status
     for (int i = 1; i < 3; ++i) {
       float diff = g_dhtAH_ema[i] - g_dhtAH_ema[0];
       g_dhtAHDiff[i - 1] = diff;
+      
+      // Apply EMA to the diff as well
+      if (isnan(g_dhtAHDiff_ema[i - 1])) {
+        // Seed EMA on first valid reading
+        g_dhtAHDiff_ema[i - 1] = diff;
+      } else {
+        g_dhtAHDiff_ema[i - 1] = EMA_ALPHA * diff + (1.0f - EMA_ALPHA) * g_dhtAHDiff_ema[i - 1];
+      }
+      
       // Set boolean wet/dry flag
       g_dhtIsWet[i - 1] = (diff > AH_WET_THRESHOLD);
     }
