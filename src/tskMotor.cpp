@@ -207,11 +207,11 @@ static void motorTask(void * /*pv*/) {
       }
     }
     
-    // ==================== CONSOLIDATED PID LOGGING (every 2 seconds) ====================
+    // ==================== CONSOLIDATED PID LOGGING (every 1 second, matches rate update interval) ====================
     {
       static unsigned long lastLogMs = 0;
       unsigned long now = millis();
-      if (now - lastLogMs >= 2000) {  // 2-second interval
+      if (now - lastLogMs >= 1000) {  // 1-second interval (matches AH rate sampling)
         // Get current shoe states
         SubState sub0State = getSub1State();
         SubState sub1State = getSub2State();
