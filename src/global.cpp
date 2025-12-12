@@ -17,6 +17,9 @@ float g_dhtAHDiff_ema[2] = {NAN, NAN};
 // boolean status: true == wet
 bool g_dhtIsWet[2] = {false, false};
 
+// AH rate-of-change in g/m³/min for sensors 1 and 2
+float g_dhtAHRate[2] = {0.0f, 0.0f};
+
 // Battery voltage monitoring implementation
 float readBatteryVoltage() {
   long sum = 0;

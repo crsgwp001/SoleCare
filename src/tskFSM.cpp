@@ -53,13 +53,17 @@ static uint32_t g_subWetStartMs[2] = {0, 0};
 static uint32_t g_subCoolingStartMs[2] = {0, 0};
 static uint32_t g_subCoolingStabilizeStartMs[2] = {0, 0};
 static bool g_coolingLocked[2] = {false, false};
+// Track if early dry exit already triggered to prevent repeated events
+static bool g_coolingEarlyExit[2] = {false, false};
 
 // Track AH rate-of-change during WET to detect peak evaporation
 // Used to exit WET state when drying rate starts declining
 static float g_prevAHRate[2] = {0.0f, 0.0f};  // Previous AH rate-of-change sample
 static uint32_t g_lastAHRateSampleMs[2] = {0, 0};  // Timestamp of last sample
 static int g_ahRateSampleCount[2] = {0, 0};  // Number of samples collected
-constexpr int MIN_AH_RATE_SAMPLES = 3;  // Need at least this many samples before checking decline
+static int g_consecutiveNegativeCount[2] = {0, 0};  // Consecutive negative rate changes
+constexpr int MIN_AH_RATE_SAMPLES = 5;  // Need at least this many samples before checking decline
+constexpr int MIN_CONSECUTIVE_NEGATIVE = 2;  // Need at least 2 consecutive negative samples to exit WET
 constexpr float AH_RATE_DECLINE_THRESHOLD = -0.01f;  // Rate-of-change decline to trigger exit (g/m³/min²)
 // Track whether the UV timer expired while the sub was in the COOLING phase.
 static bool g_uvExpiredDuringCooling[2] = {false, false};
@@ -75,6 +79,13 @@ static bool g_motorStarted[2] = {false, false};
 // Sequential WET lock: only one shoe can be in S_WET at a time
 // -1 = free, 0 = shoe 0 owns the lock, 1 = shoe 1 owns the lock
 static int g_wetLockOwner = -1;
+// Guard to prevent repeated handleEvent in WAITING run callbacks (watchdog protection)
+static bool g_waitingEventPosted[2] = {false, false};
+
+static inline bool coolingMotorPhaseActive(int idx) {
+  // Motor phase is active if cooling started and stabilization hasn't begun yet
+  return (g_subCoolingStartMs[idx] != 0 && g_subCoolingStabilizeStartMs[idx] == 0);
+}
 
 // LED status tracking
 static uint32_t g_ledBlinkMs = 0;  // Timestamp for LED blinking
@@ -296,6 +307,7 @@ static void setupStateMachines() {
       {SubState::S_WAITING,
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: WAITING for WET lock");
+         g_waitingEventPosted[0] = false;  // Reset guard on entry
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: leaving WAITING");
@@ -329,6 +341,7 @@ static void setupStateMachines() {
          motorSetDutyPercent(0, 80); // hold motor at 80% during COOLING
          g_subCoolingStartMs[0] = millis();
          g_coolingLocked[0] = true;
+         g_coolingEarlyExit[0] = false;
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: leaving COOLING"); /* leaving cooling */
@@ -365,6 +378,7 @@ static void setupStateMachines() {
       {SubState::S_WAITING,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: WAITING for WET lock");
+         g_waitingEventPosted[1] = false;  // Reset guard on entry
        },
        []() {
          FSM_DBG_PRINTLN("SUB2 EXIT: leaving WAITING");
@@ -395,6 +409,7 @@ static void setupStateMachines() {
          motorSetDutyPercent(1, 80); // hold motor at 80% during COOLING
          g_subCoolingStartMs[1] = millis();
          g_coolingLocked[1] = true;
+         g_coolingEarlyExit[1] = false;
        },
        []() { FSM_DBG_PRINTLN("SUB2 EXIT: leaving COOLING"); }},
       {SubState::S_DRY,
@@ -445,6 +460,14 @@ static void setupStateMachines() {
   // If WET lock is free, acquire it and transition to WET
   // Priority: wetter shoe (higher AH diff) gets lock first
   fsmSub1.setRun(SubState::S_WAITING, []() {
+    // Guard against repeated event posting (watchdog protection)
+    if (g_waitingEventPosted[0])
+      return;
+
+    // Do not start WET if the other shoe is in COOLING motor phase (avoid motor overlap)
+    if (coolingMotorPhaseActive(1))
+      return;
+
     if (g_wetLockOwner == -1) {
       // Lock is free, check priority vs sub2
       if (fsmSub2.getState() == SubState::S_WAITING) {
@@ -455,6 +478,7 @@ static void setupStateMachines() {
           // SUB1 is wetter or equal, acquire lock
           g_wetLockOwner = 0;
           FSM_DBG_PRINTLN("SUB1: Acquired WET lock (priority)");
+          g_waitingEventPosted[0] = true;
           fsmSub1.handleEvent(Event::SubStart);
         }
         // else: wait for SUB2 to acquire lock
@@ -462,12 +486,21 @@ static void setupStateMachines() {
         // SUB2 not waiting, acquire lock
         g_wetLockOwner = 0;
         FSM_DBG_PRINTLN("SUB1: Acquired WET lock");
+        g_waitingEventPosted[0] = true;
         fsmSub1.handleEvent(Event::SubStart);
       }
     }
   });
 
   fsmSub2.setRun(SubState::S_WAITING, []() {
+    // Guard against repeated event posting (watchdog protection)
+    if (g_waitingEventPosted[1])
+      return;
+
+    // Do not start WET if the other shoe is in COOLING motor phase (avoid motor overlap)
+    if (coolingMotorPhaseActive(0))
+      return;
+
     if (g_wetLockOwner == -1) {
       // Lock is free, check priority vs sub1
       if (fsmSub1.getState() == SubState::S_WAITING) {
@@ -478,6 +511,7 @@ static void setupStateMachines() {
           // SUB2 is wetter, acquire lock
           g_wetLockOwner = 1;
           FSM_DBG_PRINTLN("SUB2: Acquired WET lock (priority)");
+          g_waitingEventPosted[1] = true;
           fsmSub2.handleEvent(Event::SubStart);
         }
         // else: wait for SUB1 to acquire lock
@@ -485,6 +519,7 @@ static void setupStateMachines() {
         // SUB1 not waiting, acquire lock
         g_wetLockOwner = 1;
         FSM_DBG_PRINTLN("SUB2: Acquired WET lock");
+        g_waitingEventPosted[1] = true;
         fsmSub2.handleEvent(Event::SubStart);
       }
     }
@@ -501,6 +536,7 @@ static void setupStateMachines() {
         g_motorStarted[0] = true;
         // Reset AH rate tracking when motor starts
         g_ahRateSampleCount[0] = 0;
+        g_consecutiveNegativeCount[0] = 0;
         g_lastAHRateSampleMs[0] = millis();
         g_prevAHRate[0] = 0.0f;
       }
@@ -513,23 +549,34 @@ static void setupStateMachines() {
       
       if ((uint32_t)(now - g_lastAHRateSampleMs[0]) >= 2000) {
         g_lastAHRateSampleMs[0] = now;
-        float currentRate = g_dhtAHDiff[0];  // Current AH diff (proxy for evaporation rate)
+        float currentRate = g_dhtAHRate[0];  // Use actual AH rate-of-change from motor control
         
         if (g_ahRateSampleCount[0] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
           // Calculate rate-of-change (second derivative)
           float rateChange = currentRate - g_prevAHRate[0];
-          FSM_DBG_PRINT("SUB1: WET AH diff=");
+          FSM_DBG_PRINT("SUB1: WET AH rate=");
           FSM_DBG_PRINT(currentRate);
           FSM_DBG_PRINT(" prev=");
           FSM_DBG_PRINT(g_prevAHRate[0]);
           FSM_DBG_PRINT(" change=");
           FSM_DBG_PRINTLN(rateChange);
           
-          // Check if rate is declining after collecting enough samples
-          if (g_ahRateSampleCount[0] >= MIN_AH_RATE_SAMPLES && rateChange < AH_RATE_DECLINE_THRESHOLD) {
+          // Track consecutive negative samples to avoid false positives
+          if (rateChange < AH_RATE_DECLINE_THRESHOLD) {
+            g_consecutiveNegativeCount[0]++;
+            FSM_DBG_PRINT("SUB1: Negative rate change detected, consecutive count: ");
+            FSM_DBG_PRINTLN(g_consecutiveNegativeCount[0]);
+          } else {
+            g_consecutiveNegativeCount[0] = 0;  // Reset on positive change
+          }
+          
+          // Exit WET only after collecting enough samples AND seeing consecutive negatives
+          if (g_ahRateSampleCount[0] >= MIN_AH_RATE_SAMPLES && 
+              g_consecutiveNegativeCount[0] >= MIN_CONSECUTIVE_NEGATIVE) {
             FSM_DBG_PRINTLN("SUB1: WET peak evaporation detected (declining rate) -> transition to COOLING");
             fsmSub1.handleEvent(Event::SubStart);
-            g_ahRateSampleCount[0] = 0;  // Reset counter
+            g_ahRateSampleCount[0] = 0;  // Reset counters
+            g_consecutiveNegativeCount[0] = 0;
           }
         }
         g_prevAHRate[0] = currentRate;
@@ -547,6 +594,7 @@ static void setupStateMachines() {
         g_motorStarted[1] = true;
         // Reset AH rate tracking when motor starts
         g_ahRateSampleCount[1] = 0;
+        g_consecutiveNegativeCount[1] = 0;
         g_lastAHRateSampleMs[1] = millis();
         g_prevAHRate[1] = 0.0f;
       }
@@ -559,23 +607,34 @@ static void setupStateMachines() {
       
       if ((uint32_t)(now - g_lastAHRateSampleMs[1]) >= 2000) {
         g_lastAHRateSampleMs[1] = now;
-        float currentRate = g_dhtAHDiff[1];  // Current AH diff (proxy for evaporation rate)
+        float currentRate = g_dhtAHRate[1];  // Use actual AH rate-of-change from motor control
         
         if (g_ahRateSampleCount[1] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
           // Calculate rate-of-change (second derivative)
           float rateChange = currentRate - g_prevAHRate[1];
-          FSM_DBG_PRINT("SUB2: WET AH diff=");
+          FSM_DBG_PRINT("SUB2: WET AH rate=");
           FSM_DBG_PRINT(currentRate);
           FSM_DBG_PRINT(" prev=");
           FSM_DBG_PRINT(g_prevAHRate[1]);
           FSM_DBG_PRINT(" change=");
           FSM_DBG_PRINTLN(rateChange);
           
-          // Check if rate is declining after collecting enough samples
-          if (g_ahRateSampleCount[1] >= MIN_AH_RATE_SAMPLES && rateChange < AH_RATE_DECLINE_THRESHOLD) {
+          // Track consecutive negative samples to avoid false positives
+          if (rateChange < AH_RATE_DECLINE_THRESHOLD) {
+            g_consecutiveNegativeCount[1]++;
+            FSM_DBG_PRINT("SUB2: Negative rate change detected, consecutive count: ");
+            FSM_DBG_PRINTLN(g_consecutiveNegativeCount[1]);
+          } else {
+            g_consecutiveNegativeCount[1] = 0;  // Reset on positive change
+          }
+          
+          // Exit WET only after collecting enough samples AND seeing consecutive negatives
+          if (g_ahRateSampleCount[1] >= MIN_AH_RATE_SAMPLES && 
+              g_consecutiveNegativeCount[1] >= MIN_CONSECUTIVE_NEGATIVE) {
             FSM_DBG_PRINTLN("SUB2: WET peak evaporation detected (declining rate) -> transition to COOLING");
             fsmSub2.handleEvent(Event::SubStart);
-            g_ahRateSampleCount[1] = 0;  // Reset counter
+            g_ahRateSampleCount[1] = 0;  // Reset counters
+            g_consecutiveNegativeCount[1] = 0;
           }
         }
         g_prevAHRate[1] = currentRate;
@@ -588,9 +647,28 @@ static void setupStateMachines() {
   // Phase 1 (0-5s): motor at 80%, heater off
   // Phase 2 (5-10s): motor off, stabilization period
   // After 10s: perform dry-check and advance
+  // OPTIMIZATION: If already dry, immediately advance to DRY state
   fsmSub1.setRun(SubState::S_COOLING, []() {
     if (g_subCoolingStartMs[0] == 0)
       return;
+    
+    // Check if shoe is already dry - guard with flag to prevent infinite loop
+    if (!g_coolingEarlyExit[0]) {
+      float earlyDiff = g_dhtAHDiff[0];
+      if (earlyDiff <= AH_DRY_THRESHOLD) {
+        FSM_DBG_PRINT("SUB1: COOLING early dry-check -> already dry (diff=");
+        FSM_DBG_PRINT(earlyDiff);
+        FSM_DBG_PRINTLN("), advancing immediately");
+        g_subCoolingStartMs[0] = 0;
+        g_subCoolingStabilizeStartMs[0] = 0;
+        g_coolingLocked[0] = false;
+        g_coolingEarlyExit[0] = true;
+        motorStop(0);
+        fsmSub1.handleEvent(Event::SubStart);
+        return;
+      }
+    }
+    
     uint32_t motorElapsed = (uint32_t)(millis() - g_subCoolingStartMs[0]);
     
     // Phase 1: motor running (0-5s)
@@ -632,6 +710,24 @@ static void setupStateMachines() {
   fsmSub2.setRun(SubState::S_COOLING, []() {
     if (g_subCoolingStartMs[1] == 0)
       return;
+    
+    // Check if shoe is already dry - guard with flag to prevent infinite loop
+    if (!g_coolingEarlyExit[1]) {
+      float earlyDiff = g_dhtAHDiff[1];
+      if (earlyDiff <= AH_DRY_THRESHOLD) {
+        FSM_DBG_PRINT("SUB2: COOLING early dry-check -> already dry (diff=");
+        FSM_DBG_PRINT(earlyDiff);
+        FSM_DBG_PRINTLN("), advancing immediately");
+        g_subCoolingStartMs[1] = 0;
+        g_subCoolingStabilizeStartMs[1] = 0;
+        g_coolingLocked[1] = false;
+        g_coolingEarlyExit[1] = true;
+        motorStop(1);
+        fsmSub2.handleEvent(Event::SubStart);
+        return;
+      }
+    }
+    
     uint32_t motorElapsed = (uint32_t)(millis() - g_subCoolingStartMs[1]);
     
     // Phase 1: motor running (0-5s)

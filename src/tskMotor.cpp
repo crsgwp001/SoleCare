@@ -72,6 +72,10 @@ static inline void setMotorPWM(uint8_t idx, int duty) {
 // Returns 0.0 during first second (warming up), then stable rates after
 static float calculateAHRate(uint8_t idx) {
   float currentAH = g_dhtAH_ema[idx + 1];  // idx+1 because sensor 0 is ambient
+  if (isnan(currentAH)) {
+    // If sensor EMA is invalid, hold last valid rate
+    return g_lastValidRate[idx];
+  }
   unsigned long now = millis();
   
   // First call - initialize timestamp
@@ -88,9 +92,20 @@ static float calculateAHRate(uint8_t idx) {
     float ahDelta = currentAH - g_lastAH[idx];
     float ratePerMin = (ahDelta / (dt / 1000.0f)) * 60.0f;
     
+    // Guard against NaN or Inf from computation errors
+    if (isnan(ratePerMin) || isinf(ratePerMin)) {
+      ratePerMin = g_lastValidRate[idx];  // Hold last valid rate if computation fails
+    }
+    
+    // Clamp rate to physically reasonable bounds (±120 g/m³/min = 2 g/m³/s)
+    // Extreme values indicate sensor noise and should be filtered
+    if (ratePerMin > 120.0f) ratePerMin = 120.0f;
+    if (ratePerMin < -120.0f) ratePerMin = -120.0f;
+    
     g_lastAH[idx] = currentAH;
     g_lastAHTime[idx] = now;
     g_lastValidRate[idx] = ratePerMin;
+    g_dhtAHRate[idx] = ratePerMin;  // Update global for FSM access
     g_rateInitialized[idx] = true;  // Mark as ready
     return ratePerMin;  // Return fresh calculation
   }
@@ -187,6 +202,15 @@ static void motorTask(void * /*pv*/) {
     for (int i = 0; i < 2; ++i) {
       if (!g_motorActive[i])
         continue;
+      
+      // Check if shoe is in COOLING state - if so, skip PID (use fixed duty set by FSM)
+      SubState currentState = (i == 0) ? getSub1State() : getSub2State();
+      if (currentState == SubState::S_COOLING) {
+        // During COOLING, FSM controls motor duty directly (80% then OFF)
+        // Store current duty for logging, but don't run PID
+        pidOutputs[i] = g_motorTargetDuty[i] / (float)MOTOR_PWM_MAX;
+        continue;
+      }
         
       unsigned long wetElapsed = millis() - g_motorStartMs[i];
       

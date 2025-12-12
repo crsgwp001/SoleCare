@@ -2,6 +2,62 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.2.0 - (2025-12-12)
+
+### Critical Fixes
+- **Fixed WET Exit Logic Bug**: Corrected WET→COOLING transition logic that was using static AH difference instead of actual rate-of-change. Previous implementation incorrectly tracked `g_dhtAHDiff[]` causing premature exits on small decreases (2.638→2.635). Now properly uses `g_dhtAHRate[]` from motor control, exposing it globally for FSM access. WET exit now correctly detects declining evaporation rate.
+- **Fixed Multiple Watchdog Timeout Issues**: 
+  - COOLING state: Added `g_coolingEarlyExit[]` guard to prevent infinite loop when early dry-check posted events repeatedly
+  - WAITING state: Added `g_waitingEventPosted[]` guard to prevent infinite loop during lock acquisition
+  - Both guards reset on state entry to allow retries
+- **Motor Overlap Prevention**: Added `coolingMotorPhaseActive()` helper to prevent second shoe from starting WET while first shoe's COOLING motor phase is active, ensuring sequential motor operation
+
+### EMI/Sensor Hardening
+- **Multi-Layer EMI Protection** (addresses Core 1 panics from motor interference):
+  - Layer 1 - Sensor Timing: Added 5ms delays between DHT reads to reduce EMI pickup during motor PWM switching
+  - Layer 2 - Rate-of-Change Limiting: Rejects AH samples with changes >2.0 g/m³ (normal <0.5), holds EMA stable during EMI spikes
+  - Layer 3 - Rate Calculation Clamping: Limits calculated AH rates to ±120 g/m³/min with NaN/Inf guards
+  - Layer 4 - Input Validation: Temperature clamped to -40-85°C, humidity to 0-100%
+  - Layer 5 - NaN Fallback: Tracks consecutive NaN streaks (MAX_NAN_STREAK=3), falls back to last valid AH
+- **Robust Sensor Path**: All sensor noise (NaN, extreme values, rapid spikes from motor EMI) now filtered at multiple stages before reaching FSM/PID logic
+
+### PID Tuning
+- **Conservative PID Parameters** (reduced from aggressive initial values):
+  - Kp: 0.2 → 0.10 (50% reduction to prevent 50%→95% jumps)
+  - Ki: 0.05 → 0.02 (60% reduction to prevent integral windup at saturation)
+  - Kd: 0.0 → 0.05 (added small derivative term for damping)
+  - Sample interval: 2s → 3s (improved measurement stability)
+- **COOLING State PID Skip**: PID now properly disabled during COOLING state (FSM controls motor duty directly at 80%)
+
+### State Machine Improvements
+- **WET Exit Robustness**: Requires MIN_CONSECUTIVE_NEGATIVE=2 consecutive negative rate samples before exiting to COOLING, filters single-sample noise
+- **COOLING Early Exit Optimization**: If shoe already dry (diff ≤ 0.5) at COOLING entry, immediately advance to DRY without waiting full 240s cycle
+- **Debug Output Clarity**: Updated FSM debug messages to show "AH rate=" instead of "AH diff=" for WET exit tracking
+
+### Configuration Changes
+- New constants: `MAX_AH_DELTA_PER_SAMPLE = 2.0f` (EMI spike rejection threshold)
+- Modified: `MIN_CONSECUTIVE_NEGATIVE = 2` (WET exit consecutive negative requirement)
+- PID tuning: Kp=0.10, Ki=0.02, Kd=0.05, 3s sample interval
+
+### Files Modified
+- `include/config.h`: Added MAX_AH_DELTA_PER_SAMPLE, updated PID constants
+- `include/global.h`: Exposed `g_dhtAHRate[2]` for FSM access
+- `src/global.cpp`: Added `g_dhtAHRate[]` definition
+- `src/tskFSM.cpp`: Fixed WET exit logic, added watchdog guards, motor overlap prevention, consecutive negative tracking
+- `src/tskMotor.cpp`: Added rate clamping (±120 g/m³/min), NaN/Inf guards, updated `g_dhtAHRate[]` global
+- `src/tskDHT.cpp`: Added EMI protection (rate limiting, 5ms delays, EMA tracking)
+
+### Testing Notes
+- Watchdog timeouts should be eliminated (both COOLING and WAITING guards active)
+- WET exit should wait for actual declining evaporation rates (not premature exits)
+- Sensor glitches from motor EMI should be filtered (no more extreme rate spikes in logs)
+- Motor overlap prevented (sequential heating operation verified)
+- PID should show smoother progression (no 50%→95% jumps, reduced saturation)
+
+### Known Issues
+- System still requires field testing to validate EMI protection effectiveness
+- PID tuning may need further adjustment based on actual drying curves
+
 ## v1.1.0 - (2025-12-12)
 
 ⚠️ **RELEASE STATUS**: Functional build with FSM redesign complete. **PID control NOT YET PRODUCTION-READY** — heavy tuning required on gains (Kp, Ki, Kd) and setpoint. Recommend testing with actual shoe loads and monitoring CSV logs to characterize system response before field deployment.

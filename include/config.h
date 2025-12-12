@@ -7,25 +7,29 @@ constexpr float AH_DRY_THRESHOLD = 0.5f;   // Shoe is dry when AH diff < this va
 constexpr float EMA_ALPHA = 0.2f;
 constexpr float AMB_AH_OFFSET = 0.0f;
 
+// EMI Protection: Maximum allowed AH change per sample (g/m³)
+// Normal changes are < 0.5 g/m³/sample; anything larger is likely EMI noise
+constexpr float MAX_AH_DELTA_PER_SAMPLE = 2.0f;
+
 // ==================== TIMING ====================
 constexpr uint32_t DONE_TIMEOUT_MS = 10u * 1000u;
 constexpr uint32_t WET_TIMEOUT_MS = 5u * 1000u;
-constexpr uint32_t DRY_COOL_MS = 60u * 1000u;
+constexpr uint32_t DRY_COOL_MS = 120u * 1000u;
 constexpr uint32_t DRY_STABILIZE_MS = 120u * 1000u;
 constexpr uint32_t MOTOR_SAFETY_MS = 600u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
-constexpr uint32_t HEATER_WARMUP_MS = 5u * 1000u;
+constexpr uint32_t HEATER_WARMUP_MS = 10u * 1000u;
 constexpr uint32_t AH_ACCEL_WARMUP_MS = 100u * 1000u;  // Wait 30s before checking AH acceleration for WET exit
 
 // ==================== PID MOTOR CONTROL ====================
 // Phase 1: P-only control with fixed setpoint and logging
 #define PID_LOGGING_ENABLED 1  // Toggle PID logging on/off (0 = disabled, 1 = enabled)
 
-// P-only tuning (Phase 1) - tuned for smooth 50-100% output
-constexpr double PID_KP = 0.2;          // Proportional gain (reduced from 5.0 to avoid saturation)
-constexpr double PID_KI = 0.05;         // Integral gain (small, to help reach setpoint over time)
-constexpr double PID_KD = 0.0;          // Derivative gain (disabled for Phase 1)
-constexpr unsigned long PID_SAMPLE_MS = 2000;  // 2-second sample interval
+// P+I+D tuning (Phase 1) - conservative tuning to prevent overshoot and saturation
+constexpr double PID_KP = 0.10;         // Proportional gain (reduced to prevent 50%→95% jumps)
+constexpr double PID_KI = 0.02;         // Integral gain (reduced to prevent windup during saturation)
+constexpr double PID_KD = 0.05;         // Derivative gain (small damping to smooth response)
+constexpr unsigned long PID_SAMPLE_MS = 3000;  // 3-second sample interval (more stable measurements)
 
 // Control parameters
 constexpr double TARGET_AH_RATE = 0.4;  // Target AH rate (g/m³/min) - Phase 1 fixed

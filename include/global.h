@@ -27,6 +27,9 @@ extern float g_dhtAHDiff_ema[2];
 // Boolean wet/dry status for sensors 1 and 2 (true = wet)
 extern bool g_dhtIsWet[2];
 
+// AH rate-of-change in g/m³/min for sensors 1 and 2 (calculated by motor task)
+extern float g_dhtAHRate[2];
+
 // Battery voltage monitoring
 float readBatteryVoltage();
 bool isBatteryOk();

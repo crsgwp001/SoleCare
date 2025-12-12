@@ -36,6 +36,30 @@
 				"$gcc"
 			],
 			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Monitor (with CSV logging)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-Command",
+				"& 'C:\\Users\\Admin\\.platformio\\penv\\Scripts\\platformio.exe' device monitor | Tee-Object -FilePath \"logs/monitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log\""
+			],
+			"isBackground": true,
+			"problemMatcher": {
+				"pattern": {
+					"regexp": "^.*$"
+				},
+				"background": {
+					"activeOnStart": true,
+					"beginsPattern": "^--- Miniterm",
+					"endsPattern": "^(.*)?--- Miniterm"
+				}
+			},
+			"group": {
+				"kind": "test",
+				"isDefault": false
+			}
 		}
 	]
 }
