@@ -68,7 +68,7 @@ static inline void setMotorPWM(uint8_t idx, int duty) {
 }
 
 // Calculate AH rate-of-change in g/m³/min
-// Returns last valid rate if < 1s has passed since last sample (for consistency)
+// Stores and returns the most recent valid rate (updated ~every 1s)
 static float calculateAHRate(uint8_t idx) {
   float currentAH = g_dhtAH_ema[idx + 1];  // idx+1 because sensor 0 is ambient
   unsigned long now = millis();
@@ -77,24 +77,22 @@ static float calculateAHRate(uint8_t idx) {
   if (g_lastAHTime[idx] == 0) {
     g_lastAH[idx] = currentAH;
     g_lastAHTime[idx] = now;
-    return 0.0f;
+    return g_lastValidRate[idx];  // Return stored rate (will be 0.0 on first run)
   }
   
   unsigned long dt = now - g_lastAHTime[idx];
-  if (dt < 1000) {
-    // Not enough time for new sample, return last valid rate for consistency
-    return g_lastValidRate[idx];
+  if (dt >= 1000) {
+    // Enough time has passed - calculate and store new rate
+    float ahDelta = currentAH - g_lastAH[idx];
+    float ratePerMin = (ahDelta / (dt / 1000.0f)) * 60.0f;
+    
+    g_lastAH[idx] = currentAH;
+    g_lastAHTime[idx] = now;
+    g_lastValidRate[idx] = ratePerMin;
   }
   
-  // Calculate new rate
-  float ahDelta = currentAH - g_lastAH[idx];
-  float ratePerMin = (ahDelta / (dt / 1000.0f)) * 60.0f;
-  
-  g_lastAH[idx] = currentAH;
-  g_lastAHTime[idx] = now;
-  g_lastValidRate[idx] = ratePerMin;  // Store for next few calls
-  
-  return ratePerMin;
+  // Return last valid rate (either newly calculated or from previous sample)
+  return g_lastValidRate[idx];
 }
 
 static void motorTask(void * /*pv*/) {
