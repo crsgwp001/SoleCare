@@ -159,11 +159,17 @@ static void motorTask(void * /*pv*/) {
       }
     }
 
-    // ==================== PID MOTOR CONTROL ====================
-    // Storage for PID outputs (updated per shoe below)
+    // ==================== AH RATE CALCULATION (continuous for logging) ====================
+    // Storage for PID outputs and rates (updated continuously)
     static float ahRates[2] = {0.0f, 0.0f};
     static double pidOutputs[2] = {0.5, 0.5};  // Default to midpoint
     
+    // Always calculate AH rates for logging (even when motor inactive)
+    for (int i = 0; i < 2; ++i) {
+      ahRates[i] = calculateAHRate(i);
+    }
+    
+    // ==================== PID MOTOR CONTROL ====================
     for (int i = 0; i < 2; ++i) {
       if (!g_motorActive[i])
         continue;
@@ -174,7 +180,6 @@ static void motorTask(void * /*pv*/) {
         // Phase 1: Warmup/initial phase - fixed duty percent
         motorSetDutyPercent(i, PID_FIXED_DUTY_PERCENT);
         pidOutputs[i] = PID_FIXED_DUTY_PERCENT / 100.0;  // Store for logging
-        ahRates[i] = 0.0f;  // No rate tracking during warmup
       } else {
         // Phase 2: PID control based on AH rate-of-change
         
@@ -186,9 +191,7 @@ static void motorTask(void * /*pv*/) {
           DEV_DBG_PRINTLN(i);
         }
         
-        // Calculate current AH rate
-        ahRates[i] = calculateAHRate(i);
-        
+        // Use already-calculated AH rate from above
         // Compute PID output (already limited to PID_OUT_MIN-PID_OUT_MAX: 0.5-1.0)
         pidOutputs[i] = g_motorPID[i].compute(ahRates[i]);
         
