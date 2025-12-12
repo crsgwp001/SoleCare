@@ -48,6 +48,7 @@ bool g_pidInitialized[2] = {false, false};  // Track PID init per shoe
 
 static float g_lastAH[2] = {0.0f, 0.0f};           // For AH rate calculation
 static unsigned long g_lastAHTime[2] = {0, 0};     // Timestamp of last AH sample
+static float g_lastValidRate[2] = {0.0f, 0.0f};    // Store last calculated rate for consistency
 
 static inline void setActuator(int pin, bool on) {
   digitalWrite(pin, (HW_ACTUATOR_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
@@ -67,11 +68,12 @@ static inline void setMotorPWM(uint8_t idx, int duty) {
 }
 
 // Calculate AH rate-of-change in g/m³/min
+// Returns last valid rate if < 1s has passed since last sample (for consistency)
 static float calculateAHRate(uint8_t idx) {
   float currentAH = g_dhtAH_ema[idx + 1];  // idx+1 because sensor 0 is ambient
   unsigned long now = millis();
   
-  // First call or not enough time passed
+  // First call - initialize
   if (g_lastAHTime[idx] == 0) {
     g_lastAH[idx] = currentAH;
     g_lastAHTime[idx] = now;
@@ -79,13 +81,18 @@ static float calculateAHRate(uint8_t idx) {
   }
   
   unsigned long dt = now - g_lastAHTime[idx];
-  if (dt < 1000) return 0.0f;  // Need at least 1 second between samples
+  if (dt < 1000) {
+    // Not enough time for new sample, return last valid rate for consistency
+    return g_lastValidRate[idx];
+  }
   
+  // Calculate new rate
   float ahDelta = currentAH - g_lastAH[idx];
   float ratePerMin = (ahDelta / (dt / 1000.0f)) * 60.0f;
   
   g_lastAH[idx] = currentAH;
   g_lastAHTime[idx] = now;
+  g_lastValidRate[idx] = ratePerMin;  // Store for next few calls
   
   return ratePerMin;
 }
