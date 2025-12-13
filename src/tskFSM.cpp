@@ -62,8 +62,11 @@ static float g_prevAHRate[2] = {0.0f, 0.0f};  // Previous AH rate-of-change samp
 static uint32_t g_lastAHRateSampleMs[2] = {0, 0};  // Timestamp of last sample
 static int g_ahRateSampleCount[2] = {0, 0};  // Number of samples collected
 static int g_consecutiveNegativeCount[2] = {0, 0};  // Consecutive negative rate changes
+static bool g_peakDetected[2] = {false, false};  // Flag: peak evaporation detected, in post-peak buffer
+static uint32_t g_peakDetectedMs[2] = {0, 0};  // Timestamp when peak was first detected
+static uint32_t g_coolingMotorDurationMs[2] = {DRY_COOL_MS_BASE, DRY_COOL_MS_BASE};  // Adaptive COOLING motor phase duration
 constexpr int MIN_AH_RATE_SAMPLES = 5;  // Need at least this many samples before checking decline
-constexpr int MIN_CONSECUTIVE_NEGATIVE = 2;  // Need at least 2 consecutive negative samples to exit WET
+constexpr int MIN_CONSECUTIVE_NEGATIVE = 3;  // Need at least 3 consecutive negative samples to exit WET (robust to noise)
 constexpr float AH_RATE_DECLINE_THRESHOLD = -0.01f;  // Rate-of-change decline to trigger exit (g/m³/min²)
 // Track whether the UV timer expired while the sub was in the COOLING phase.
 static bool g_uvExpiredDuringCooling[2] = {false, false};
@@ -322,6 +325,9 @@ static void setupStateMachines() {
          motorSetDutyPercent(0, 0);
          heaterRun(0, true);
          g_subWetStartMs[0] = millis();
+         // Reset peak detection for new WET cycle
+         g_peakDetected[0] = false;
+         g_peakDetectedMs[0] = 0;
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: WET -> resetting PID and releasing lock");
@@ -338,7 +344,26 @@ static void setupStateMachines() {
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING"); /* turn heater off, motor kept running */
          heaterRun(0, false);
-         motorSetDutyPercent(0, 80); // hold motor at 80% during COOLING
+         
+         // Adaptive COOLING: Adjust motor duty based on current moisture level
+         float coolingDiff = g_dhtAHDiff[0];
+         
+         if (coolingDiff > 2.0f) {
+           // Very wet shoe - aggressive drying
+           motorSetDutyPercent(0, 100);  // 100% motor duty
+           g_coolingMotorDurationMs[0] = DRY_COOL_MS_WET;  // Extended duration (180s)
+           FSM_DBG_PRINT("SUB1 COOLING: Very wet (diff=");
+           FSM_DBG_PRINT(coolingDiff);
+           FSM_DBG_PRINTLN(") -> 100% duty, extended timing");
+         } else {
+           // Moderately wet or borderline - standard cooling
+           motorSetDutyPercent(0, 80);  // 80% motor duty
+           g_coolingMotorDurationMs[0] = DRY_COOL_MS_BASE;  // Standard duration (120s)
+           FSM_DBG_PRINT("SUB1 COOLING: Moderate dryness (diff=");
+           FSM_DBG_PRINT(coolingDiff);
+           FSM_DBG_PRINTLN(") -> 80% duty, standard timing");
+         }
+         
          g_subCoolingStartMs[0] = millis();
          g_coolingLocked[0] = true;
          g_coolingEarlyExit[0] = false;
@@ -391,6 +416,9 @@ static void setupStateMachines() {
          motorSetDutyPercent(1, 0);
          heaterRun(1, true);
          g_subWetStartMs[1] = millis();
+         // Reset peak detection for new WET cycle
+         g_peakDetected[1] = false;
+         g_peakDetectedMs[1] = 0;
        },
        []() {
          FSM_DBG_PRINTLN("SUB2 EXIT: WET -> resetting PID and releasing lock");
@@ -406,7 +434,26 @@ static void setupStateMachines() {
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING");
          heaterRun(1, false);
-         motorSetDutyPercent(1, 80); // hold motor at 80% during COOLING
+         
+         // Adaptive COOLING: Adjust motor duty based on current moisture level
+         float coolingDiff = g_dhtAHDiff[1];
+         
+         if (coolingDiff > 2.0f) {
+           // Very wet shoe - aggressive drying
+           motorSetDutyPercent(1, 100);  // 100% motor duty
+           g_coolingMotorDurationMs[1] = DRY_COOL_MS_WET;  // Extended duration (180s)
+           FSM_DBG_PRINT("SUB2 COOLING: Very wet (diff=");
+           FSM_DBG_PRINT(coolingDiff);
+           FSM_DBG_PRINTLN(") -> 100% duty, extended timing");
+         } else {
+           // Moderately wet or borderline - standard cooling
+           motorSetDutyPercent(1, 80);  // 80% motor duty
+           g_coolingMotorDurationMs[1] = DRY_COOL_MS_BASE;  // Standard duration (120s)
+           FSM_DBG_PRINT("SUB2 COOLING: Moderate dryness (diff=");
+           FSM_DBG_PRINT(coolingDiff);
+           FSM_DBG_PRINTLN(") -> 80% duty, standard timing");
+         }
+         
          g_subCoolingStartMs[1] = millis();
          g_coolingLocked[1] = true;
          g_coolingEarlyExit[1] = false;
@@ -547,41 +594,80 @@ static void setupStateMachines() {
       uint32_t now = millis();
       uint32_t wetElapsed = (uint32_t)(now - g_subWetStartMs[0]);
       
-      if ((uint32_t)(now - g_lastAHRateSampleMs[0]) >= 2000) {
-        g_lastAHRateSampleMs[0] = now;
-        float currentRate = g_dhtAHRate[0];  // Use actual AH rate-of-change from motor control
-        
-        if (g_ahRateSampleCount[0] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
-          // Calculate rate-of-change (second derivative)
-          float rateChange = currentRate - g_prevAHRate[0];
-          FSM_DBG_PRINT("SUB1: WET AH rate=");
-          FSM_DBG_PRINT(currentRate);
-          FSM_DBG_PRINT(" prev=");
-          FSM_DBG_PRINT(g_prevAHRate[0]);
-          FSM_DBG_PRINT(" change=");
-          FSM_DBG_PRINTLN(rateChange);
-          
-          // Track consecutive negative samples to avoid false positives
-          if (rateChange < AH_RATE_DECLINE_THRESHOLD) {
-            g_consecutiveNegativeCount[0]++;
-            FSM_DBG_PRINT("SUB1: Negative rate change detected, consecutive count: ");
-            FSM_DBG_PRINTLN(g_consecutiveNegativeCount[0]);
-          } else {
-            g_consecutiveNegativeCount[0] = 0;  // Reset on positive change
-          }
-          
-          // Exit WET only after collecting enough samples AND seeing consecutive negatives
-          if (g_ahRateSampleCount[0] >= MIN_AH_RATE_SAMPLES && 
-              g_consecutiveNegativeCount[0] >= MIN_CONSECUTIVE_NEGATIVE) {
-            FSM_DBG_PRINTLN("SUB1: WET peak evaporation detected (declining rate) -> transition to COOLING");
+      // Early return if sampling interval hasn't elapsed (prevent tight loop)
+      if ((uint32_t)(now - g_lastAHRateSampleMs[0]) < 2000) {
+        return;
+      }
+      
+      g_lastAHRateSampleMs[0] = now;
+      float currentRate = g_dhtAHRate[0];  // Use actual AH rate-of-change from motor control
+      
+      // Validate rate before processing (reject NaN/Inf from sensor glitches)
+      if (isnan(currentRate) || isinf(currentRate)) {
+        return;  // Skip this sample, wait for next valid rate
+      }
+      
+      // Check if peak detected and buffer period active
+      if (g_peakDetected[0]) {
+        uint32_t bufferElapsed = (uint32_t)(now - g_peakDetectedMs[0]);
+        if (bufferElapsed < WET_PEAK_BUFFER_MS) {
+          // Still in post-peak buffer period - continue drying, don't exit
+          FSM_DBG_PRINT("SUB1: WET in post-peak buffer (");
+          FSM_DBG_PRINT(bufferElapsed);
+          FSM_DBG_PRINTLN("ms remaining)");
+          return;
+        } else {
+          // Buffer period expired, check minimum WET duration before exiting
+          if (wetElapsed >= WET_MIN_DURATION_MS) {
+            FSM_DBG_PRINTLN("SUB1: WET peak + buffer complete -> transition to COOLING");
             fsmSub1.handleEvent(Event::SubStart);
             g_ahRateSampleCount[0] = 0;  // Reset counters
             g_consecutiveNegativeCount[0] = 0;
+            g_peakDetected[0] = false;
+            g_peakDetectedMs[0] = 0;
+            return;
+          } else {
+            // Minimum duration not yet reached - continue drying
+            uint32_t remainingMs = WET_MIN_DURATION_MS - wetElapsed;
+            FSM_DBG_PRINT("SUB1: WET waiting for minimum duration (");
+            FSM_DBG_PRINT(remainingMs);
+            FSM_DBG_PRINTLN("ms remaining)");
+            return;
           }
         }
-        g_prevAHRate[0] = currentRate;
-        g_ahRateSampleCount[0]++;
       }
+      
+      // Peak detection logic (only if minimum time not reached OR continuing detection)
+      if (g_ahRateSampleCount[0] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
+        // Calculate rate-of-change (second derivative)
+        float rateChange = currentRate - g_prevAHRate[0];
+        FSM_DBG_PRINT("SUB1: WET AH rate=");
+        FSM_DBG_PRINT(currentRate);
+        FSM_DBG_PRINT(" prev=");
+        FSM_DBG_PRINT(g_prevAHRate[0]);
+        FSM_DBG_PRINT(" change=");
+        FSM_DBG_PRINTLN(rateChange);
+        
+        // Track consecutive negative samples to avoid false positives
+        if (rateChange < AH_RATE_DECLINE_THRESHOLD) {
+          g_consecutiveNegativeCount[0]++;
+          FSM_DBG_PRINT("SUB1: Negative rate change detected, consecutive count: ");
+          FSM_DBG_PRINTLN(g_consecutiveNegativeCount[0]);
+        } else {
+          g_consecutiveNegativeCount[0] = 0;  // Reset on positive change
+        }
+        
+        // Detect peak: need MIN_CONSECUTIVE_NEGATIVE (3) consecutive declines
+        if (g_ahRateSampleCount[0] >= MIN_AH_RATE_SAMPLES && 
+            g_consecutiveNegativeCount[0] >= MIN_CONSECUTIVE_NEGATIVE) {
+          FSM_DBG_PRINTLN("SUB1: WET peak evaporation detected (declining rate) -> entering post-peak buffer");
+          g_peakDetected[0] = true;
+          g_peakDetectedMs[0] = now;
+          g_consecutiveNegativeCount[0] = 0;  // Reset for next detection
+        }
+      }
+      g_prevAHRate[0] = currentRate;
+      g_ahRateSampleCount[0]++;
     }
   });
   fsmSub2.setRun(SubState::S_WET, []() {
@@ -605,11 +691,51 @@ static void setupStateMachines() {
       uint32_t now = millis();
       uint32_t wetElapsed = (uint32_t)(now - g_subWetStartMs[1]);
       
-      if ((uint32_t)(now - g_lastAHRateSampleMs[1]) >= 2000) {
-        g_lastAHRateSampleMs[1] = now;
-        float currentRate = g_dhtAHRate[1];  // Use actual AH rate-of-change from motor control
-        
-        if (g_ahRateSampleCount[1] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
+      // Early return if sampling interval hasn't elapsed (prevent tight loop)
+      if ((uint32_t)(now - g_lastAHRateSampleMs[1]) < 2000) {
+        return;
+      }
+      
+      g_lastAHRateSampleMs[1] = now;
+      float currentRate = g_dhtAHRate[1];  // Use actual AH rate-of-change from motor control
+      
+      // Validate rate before processing (reject NaN/Inf from sensor glitches)
+      if (isnan(currentRate) || isinf(currentRate)) {
+        return;  // Skip this sample, wait for next valid rate
+      }
+      
+      // Check if peak detected and buffer period active
+      if (g_peakDetected[1]) {
+        uint32_t bufferElapsed = (uint32_t)(now - g_peakDetectedMs[1]);
+        if (bufferElapsed < WET_PEAK_BUFFER_MS) {
+          // Still in post-peak buffer period - continue drying, don't exit
+          FSM_DBG_PRINT("SUB2: WET in post-peak buffer (");
+          FSM_DBG_PRINT(bufferElapsed);
+          FSM_DBG_PRINTLN("ms remaining)");
+          return;
+        } else {
+          // Buffer period expired, check minimum WET duration before exiting
+          if (wetElapsed >= WET_MIN_DURATION_MS) {
+            FSM_DBG_PRINTLN("SUB2: WET peak + buffer complete -> transition to COOLING");
+            fsmSub2.handleEvent(Event::SubStart);
+            g_ahRateSampleCount[1] = 0;  // Reset counters
+            g_consecutiveNegativeCount[1] = 0;
+            g_peakDetected[1] = false;
+            g_peakDetectedMs[1] = 0;
+            return;
+          } else {
+            // Minimum duration not yet reached - continue drying
+            uint32_t remainingMs = WET_MIN_DURATION_MS - wetElapsed;
+            FSM_DBG_PRINT("SUB2: WET waiting for minimum duration (");
+            FSM_DBG_PRINT(remainingMs);
+            FSM_DBG_PRINTLN("ms remaining)");
+            return;
+          }
+        }
+      }
+      
+      // Peak detection logic (only if minimum time not reached OR continuing detection)
+      if (g_ahRateSampleCount[1] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
           // Calculate rate-of-change (second derivative)
           float rateChange = currentRate - g_prevAHRate[1];
           FSM_DBG_PRINT("SUB2: WET AH rate=");
@@ -628,19 +754,18 @@ static void setupStateMachines() {
             g_consecutiveNegativeCount[1] = 0;  // Reset on positive change
           }
           
-          // Exit WET only after collecting enough samples AND seeing consecutive negatives
+          // Detect peak: need MIN_CONSECUTIVE_NEGATIVE (3) consecutive declines
           if (g_ahRateSampleCount[1] >= MIN_AH_RATE_SAMPLES && 
               g_consecutiveNegativeCount[1] >= MIN_CONSECUTIVE_NEGATIVE) {
-            FSM_DBG_PRINTLN("SUB2: WET peak evaporation detected (declining rate) -> transition to COOLING");
-            fsmSub2.handleEvent(Event::SubStart);
-            g_ahRateSampleCount[1] = 0;  // Reset counters
-            g_consecutiveNegativeCount[1] = 0;
+            FSM_DBG_PRINTLN("SUB2: WET peak evaporation detected (declining rate) -> entering post-peak buffer");
+            g_peakDetected[1] = true;
+            g_peakDetectedMs[1] = now;
+            g_consecutiveNegativeCount[1] = 0;  // Reset for next detection
           }
         }
         g_prevAHRate[1] = currentRate;
         g_ahRateSampleCount[1]++;
       }
-    }
   });
 
   // S_COOLING run: two-phase logic
@@ -671,8 +796,8 @@ static void setupStateMachines() {
     
     uint32_t motorElapsed = (uint32_t)(millis() - g_subCoolingStartMs[0]);
     
-    // Phase 1: motor running (0-5s)
-    if (motorElapsed < DRY_COOL_MS) {
+    // Phase 1: motor running (adaptive duration based on wetness)
+    if (motorElapsed < g_coolingMotorDurationMs[0]) {
       return; // Still in motor-run phase
     }
     
@@ -730,8 +855,8 @@ static void setupStateMachines() {
     
     uint32_t motorElapsed = (uint32_t)(millis() - g_subCoolingStartMs[1]);
     
-    // Phase 1: motor running (0-5s)
-    if (motorElapsed < DRY_COOL_MS) {
+    // Phase 1: motor running (adaptive duration based on wetness)
+    if (motorElapsed < g_coolingMotorDurationMs[1]) {
       return; // Still in motor-run phase
     }
     

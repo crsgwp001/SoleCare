@@ -14,12 +14,15 @@ constexpr float MAX_AH_DELTA_PER_SAMPLE = 2.0f;
 // ==================== TIMING ====================
 constexpr uint32_t DONE_TIMEOUT_MS = 10u * 1000u;
 constexpr uint32_t WET_TIMEOUT_MS = 5u * 1000u;
-constexpr uint32_t DRY_COOL_MS = 120u * 1000u;
-constexpr uint32_t DRY_STABILIZE_MS = 120u * 1000u;
+constexpr uint32_t WET_MIN_DURATION_MS = 300u * 1000u;  // Minimum 5 minutes of WET phase before allowing exit
+constexpr uint32_t WET_PEAK_BUFFER_MS = 60u * 1000u;  // Extra 60s buffer after peak detected for additional drying
+constexpr uint32_t DRY_COOL_MS_BASE = 120u * 1000u;  // Base COOLING motor duration (for diff 0.5-2.0)
+constexpr uint32_t DRY_COOL_MS_WET = 180u * 1000u;  // Extended COOLING motor duration (for diff > 2.0)
+constexpr uint32_t DRY_STABILIZE_MS = 120u * 1000u;  // Stabilization phase after motor stops
 constexpr uint32_t MOTOR_SAFETY_MS = 600u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
 constexpr uint32_t HEATER_WARMUP_MS = 10u * 1000u;
-constexpr uint32_t AH_ACCEL_WARMUP_MS = 100u * 1000u;  // Wait 30s before checking AH acceleration for WET exit
+constexpr uint32_t AH_ACCEL_WARMUP_MS = 180u * 1000u;  // Wait 3mins before checking AH acceleration for WET exit
 
 // ==================== PID MOTOR CONTROL ====================
 // Phase 1: P-only control with fixed setpoint and logging
