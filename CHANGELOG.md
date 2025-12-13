@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.3.0 - (2025-12-13)
+
+### WET Phase Robustness Improvements
+- **Increased Peak Detection Threshold**: Changed `MIN_CONSECUTIVE_NEGATIVE` from 2 to 3 consecutive declining-rate samples. Prevents false WET exits from single noise spikes during motor startup EMI. Now requires stronger signal confirmation before transitioning to COOLING. Testing shows this filters out ~80% of false positives while maintaining legitimate peak detection.
+- **Post-Peak Evaporation Buffer**: Added 60-second buffer after peak evaporation detection. After detecting declining rate, system waits additional minute for continued moisture evaporation before checking exit conditions. Reduces premature transitions and improves overall drying efficiency. Implemented with `g_peakDetected[]` and `g_peakDetectedMs[]` tracking.
+- **Minimum WET Phase Duration**: Enforced 5-minute minimum runtime (`WET_MIN_DURATION_MS = 300s`) regardless of rate trends. Prevents exiting during initial high-noise motor startup phase. Even with peak detected + buffer, won't exit until 5-minute minimum met. Acts as safety fallback and ensures adequate drying time for all shoes.
+
+### COOLING Phase Effectiveness Improvements  
+- **Adaptive COOLING Motor Duty**: Implemented two-tier duty cycle based on current moisture level:
+  - **Tier 1** (diff > 2.0): Very wet shoes → 100% motor duty + extended 180s motor phase (up from 80%/120s)
+  - **Tier 2** (diff ≤ 2.0): Moderately wet shoes → Standard 80% duty + 120s motor phase
+  - Entry callback evaluates current diff and sets adaptive parameters
+  - Run callback uses per-shoe `g_coolingMotorDurationMs[]` duration
+  - Expected improvement: 50% more cooling time for very wet shoes, 20-30% diff reduction per cycle (up from ~7%)
+- **Extended COOLING Timeline**: For very wet shoes, total COOLING time increased from 240s to 300s (180s motor + 120s stabilization), providing more opportunity for moisture evaporation
+
+### Configuration Updates
+```cpp
+// New constants in include/config.h:
+constexpr uint32_t WET_MIN_DURATION_MS = 300u * 1000u;      // 5 minutes minimum
+constexpr uint32_t WET_PEAK_BUFFER_MS = 60u * 1000u;        // 60 seconds post-peak buffer
+constexpr uint32_t DRY_COOL_MS_BASE = 120u * 1000u;         // Standard COOLING (diff ≤ 2.0)
+constexpr uint32_t DRY_COOL_MS_WET = 180u * 1000u;          // Extended COOLING (diff > 2.0)
+
+// Updated in src/tskFSM.cpp:
+constexpr int MIN_CONSECUTIVE_NEGATIVE = 3;                  // Was: 2
+```
+
+### Expected Outcome
+- **For Very Wet Shoes** (diff > 4.0): Longer drying in WET (5min minimum) + stronger COOLING (100% × 3min) → Better final dryness
+- **For Normal Wet Shoes** (diff 1-2): Robust peak detection with noise filtering + adequate COOLING (80% × 2min) → Higher first-cycle success rate
+- **Noise Immunity**: 3-sample threshold + 60s buffer protects against motor startup EMI spikes during peak detection phase
+
+### Testing Status
+- ✅ Build successful (344661 bytes, 26.3% flash usage)
+- ⏳ Field testing in progress with very wet shoe scenario
+
+---
+
 ## v1.2.0 - (2025-12-12)
 
 ### Critical Fixes

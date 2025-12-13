@@ -3,7 +3,8 @@
 
 // ==================== SENSOR THRESHOLDS ====================
 constexpr float AH_WET_THRESHOLD = 1.0f;   // Shoe is wet when AH diff > this value (enter WET)
-constexpr float AH_DRY_THRESHOLD = 0.5f;   // Shoe is dry when AH diff < this value (exit COOLING to DRY, hysteresis from WET)
+constexpr float AH_DRY_THRESHOLD = 0.7f;   // Shoe is dry when AH diff < this value (exit COOLING to DRY, hysteresis from WET)
+constexpr float AH_DRY_THRESHOLD_LENIENT = 1.0f;  // Lenient threshold when AH diff is consistently declining
 constexpr float EMA_ALPHA = 0.2f;
 constexpr float AMB_AH_OFFSET = 0.0f;
 
@@ -14,11 +15,12 @@ constexpr float MAX_AH_DELTA_PER_SAMPLE = 2.0f;
 // ==================== TIMING ====================
 constexpr uint32_t DONE_TIMEOUT_MS = 10u * 1000u;
 constexpr uint32_t WET_TIMEOUT_MS = 5u * 1000u;
-constexpr uint32_t WET_MIN_DURATION_MS = 300u * 1000u;  // Minimum 5 minutes of WET phase before allowing exit
-constexpr uint32_t WET_PEAK_BUFFER_MS = 60u * 1000u;  // Extra 60s buffer after peak detected for additional drying
-constexpr uint32_t DRY_COOL_MS_BASE = 120u * 1000u;  // Base COOLING motor duration (for diff 0.5-2.0)
-constexpr uint32_t DRY_COOL_MS_WET = 180u * 1000u;  // Extended COOLING motor duration (for diff > 2.0)
-constexpr uint32_t DRY_STABILIZE_MS = 120u * 1000u;  // Stabilization phase after motor stops
+constexpr uint32_t WET_MIN_DURATION_MS = 360u * 1000u;  // Minimum 6 minutes of WET phase (aggressive heater-on evaporation)
+constexpr uint32_t WET_PEAK_BUFFER_MS = 75u * 1000u;  // Extra 75s buffer after peak detected for additional drying
+constexpr uint32_t DRY_COOL_MS_BASE = 90u * 1000u;  // Base COOLING motor duration (reduced - most work done in WET)
+constexpr uint32_t DRY_COOL_MS_WET = 150u * 1000u;  // Extended COOLING motor duration (reduced)
+constexpr uint32_t DRY_COOL_MS_SOAKED = 180u * 1000u;  // Extended COOLING motor duration (reduced)
+constexpr uint32_t DRY_STABILIZE_MS = 90u * 1000u;  // Stabilization phase after motor stops
 constexpr uint32_t MOTOR_SAFETY_MS = 600u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
 constexpr uint32_t HEATER_WARMUP_MS = 10u * 1000u;
@@ -28,10 +30,10 @@ constexpr uint32_t AH_ACCEL_WARMUP_MS = 180u * 1000u;  // Wait 3mins before chec
 // Phase 1: P-only control with fixed setpoint and logging
 #define PID_LOGGING_ENABLED 1  // Toggle PID logging on/off (0 = disabled, 1 = enabled)
 
-// P+I+D tuning (Phase 1) - conservative tuning to prevent overshoot and saturation
-constexpr double PID_KP = 0.10;         // Proportional gain (reduced to prevent 50%→95% jumps)
-constexpr double PID_KI = 0.02;         // Integral gain (reduced to prevent windup during saturation)
-constexpr double PID_KD = 0.05;         // Derivative gain (small damping to smooth response)
+// P+I+D tuning - balanced for responsive evaporation control
+constexpr double PID_KP = 0.15;         // Proportional gain (increased for faster response)
+constexpr double PID_KI = 0.03;         // Integral gain (increased slightly to eliminate steady-state error)
+constexpr double PID_KD = 0.08;         // Derivative gain (increased for better damping)
 constexpr unsigned long PID_SAMPLE_MS = 3000;  // 3-second sample interval (more stable measurements)
 
 // Control parameters
@@ -41,11 +43,11 @@ constexpr double PID_OUT_MIN = 0.5;     // Minimum duty (50%)
 constexpr double PID_OUT_MAX = 1.0;     // Maximum duty (100%)
 constexpr int PID_FIXED_DUTY_PERCENT = 75;  // Fixed duty during warmup phase
 
-// Phase 2: Dual-phase setpoint switching (ready for implementation)
-// Uncomment and modify when ready to implement Phase 2
-// constexpr double TARGET_AH_RATE_EVAP = 0.4;    // Phase 2A: Aggressive evaporation
-// constexpr double TARGET_AH_RATE_STABLE = -0.1; // Phase 2B: Gentle stabilization
-// constexpr double AH_RATE_PHASE_THRESHOLD = 0.1; // Threshold to switch phases
+// Phase 2: Dual-phase setpoint switching (implemented)
+constexpr double TARGET_AH_RATE_EVAP = 0.45;     // Phase 2A: Aggressive evaporation target (increased)
+constexpr double TARGET_AH_RATE_STABLE = 0.08;   // Phase 2B: Gentle stabilization target (increased slightly)
+constexpr double AH_RATE_PHASE_THRESHOLD = 0.25; // Switch from EVAP to STABLE when rate < 0.25 (tighter)
+constexpr unsigned long PID_PHASE1_MIN_MS = 120000; // Ensure at least 120s in Phase 1 before switching
 
 // ==================== GPIO PINS ====================
 // Sensors

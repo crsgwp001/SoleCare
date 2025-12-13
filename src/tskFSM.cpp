@@ -64,7 +64,15 @@ static int g_ahRateSampleCount[2] = {0, 0};  // Number of samples collected
 static int g_consecutiveNegativeCount[2] = {0, 0};  // Consecutive negative rate changes
 static bool g_peakDetected[2] = {false, false};  // Flag: peak evaporation detected, in post-peak buffer
 static uint32_t g_peakDetectedMs[2] = {0, 0};  // Timestamp when peak was first detected
+// Moving-average buffers for robust decline detection
+static float g_rateHistory[2][8] = {{0}}; // last 8 samples per shoe
+static int g_rateHistoryIdx[2] = {0, 0};
+static int g_rateHistoryCount[2] = {0, 0};
 static uint32_t g_coolingMotorDurationMs[2] = {DRY_COOL_MS_BASE, DRY_COOL_MS_BASE};  // Adaptive COOLING motor phase duration
+static uint8_t g_coolingRetryCount[2] = {0, 0};  // Number of cooling retries within a cycle
+static float g_coolingDiffSamples[2][6] = {{0.0f}};  // Last 6 AH diff samples during stabilization
+static int g_coolingDiffSampleIdx[2] = {0, 0};  // Current sample index
+static int g_coolingDiffSampleCount[2] = {0, 0};  // Number of samples collected
 constexpr int MIN_AH_RATE_SAMPLES = 5;  // Need at least this many samples before checking decline
 constexpr int MIN_CONSECUTIVE_NEGATIVE = 3;  // Need at least 3 consecutive negative samples to exit WET (robust to noise)
 constexpr float AH_RATE_DECLINE_THRESHOLD = -0.01f;  // Rate-of-change decline to trigger exit (g/m³/min²)
@@ -88,6 +96,77 @@ static bool g_waitingEventPosted[2] = {false, false};
 static inline bool coolingMotorPhaseActive(int idx) {
   // Motor phase is active if cooling started and stabilization hasn't begun yet
   return (g_subCoolingStartMs[idx] != 0 && g_subCoolingStabilizeStartMs[idx] == 0);
+}
+
+// Check if AH diff is consistently declining during stabilization
+static bool isAHDiffDeclining(int idx) {
+  if (g_coolingDiffSampleCount[idx] < 4) return false;  // Need at least 4 samples
+  
+  // Check last 4 samples for declining trend
+  int declineCount = 0;
+  for (int i = 1; i < 4; i++) {
+    int currIdx = (g_coolingDiffSampleIdx[idx] - i + 6) % 6;
+    int prevIdx = (g_coolingDiffSampleIdx[idx] - i - 1 + 6) % 6;
+    if (g_coolingDiffSamples[idx][currIdx] < g_coolingDiffSamples[idx][prevIdx]) {
+      declineCount++;
+    }
+  }
+  return declineCount >= 2;  // At least 2 out of 3 transitions show decline
+}
+
+// Configure cooling motor duty and duration based on moisture level and retry status
+static void startCoolingPhase(int idx, bool isRetry) {
+  heaterRun(idx, false);
+
+  const char *label = (idx == 0) ? "SUB1" : "SUB2";
+  float coolingDiff = g_dhtAHDiff[idx];
+
+  // Base selections - shorter since heavy lifting done in WET phase
+  uint32_t durationMs = DRY_COOL_MS_BASE;
+  int dutyPercent = 80;
+
+  if (coolingDiff > 2.0f) {
+    // Still very wet after extended WET: max cooling
+    dutyPercent = 100;
+    durationMs = DRY_COOL_MS_SOAKED;  // 180s
+    FSM_DBG_PRINT(label);
+    FSM_DBG_PRINT(" COOLING: Still very wet (diff=");
+    FSM_DBG_PRINT(coolingDiff);
+    FSM_DBG_PRINTLN(") -> 100% duty, extended timing");
+  } else if (coolingDiff > 1.2f) {
+    // Moderately wet: standard cooling
+    dutyPercent = 90;
+    durationMs = DRY_COOL_MS_WET;  // 150s
+    FSM_DBG_PRINT(label);
+    FSM_DBG_PRINT(" COOLING: Moderate (diff=");
+    FSM_DBG_PRINT(coolingDiff);
+    FSM_DBG_PRINTLN(") -> 90% duty, standard timing");
+  } else {
+    // Nearly dry: light final cooling
+    dutyPercent = 80;
+    durationMs = DRY_COOL_MS_BASE;  // 90s
+    FSM_DBG_PRINT(label);
+    FSM_DBG_PRINT(" COOLING: Nearly dry (diff=");
+    FSM_DBG_PRINT(coolingDiff);
+    FSM_DBG_PRINTLN(") -> 80% duty, base timing");
+  }
+
+  // Retry path: boost by one tier if not already maxed
+  if (isRetry) {
+    if (dutyPercent < 100) dutyPercent = 100;
+    if (durationMs < DRY_COOL_MS_WET) durationMs = DRY_COOL_MS_WET;  // Max 150s on retry
+    FSM_DBG_PRINT(label);
+    FSM_DBG_PRINTLN(" COOLING: Retry -> boosting to 100% duty, extended timing");
+  }
+
+  motorSetDutyPercent(idx, dutyPercent);
+  g_coolingMotorDurationMs[idx] = durationMs;
+  g_subCoolingStartMs[idx] = millis();
+  g_subCoolingStabilizeStartMs[idx] = 0;
+  g_coolingLocked[idx] = true;
+  g_coolingEarlyExit[idx] = false;
+  g_coolingDiffSampleIdx[idx] = 0;
+  g_coolingDiffSampleCount[idx] = 0;
 }
 
 // LED status tracking
@@ -328,6 +407,7 @@ static void setupStateMachines() {
          // Reset peak detection for new WET cycle
          g_peakDetected[0] = false;
          g_peakDetectedMs[0] = 0;
+         g_coolingRetryCount[0] = 0;  // Reset cooling retries for new cycle
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: WET -> resetting PID and releasing lock");
@@ -343,30 +423,7 @@ static void setupStateMachines() {
       {SubState::S_COOLING,
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: COOLING"); /* turn heater off, motor kept running */
-         heaterRun(0, false);
-         
-         // Adaptive COOLING: Adjust motor duty based on current moisture level
-         float coolingDiff = g_dhtAHDiff[0];
-         
-         if (coolingDiff > 2.0f) {
-           // Very wet shoe - aggressive drying
-           motorSetDutyPercent(0, 100);  // 100% motor duty
-           g_coolingMotorDurationMs[0] = DRY_COOL_MS_WET;  // Extended duration (180s)
-           FSM_DBG_PRINT("SUB1 COOLING: Very wet (diff=");
-           FSM_DBG_PRINT(coolingDiff);
-           FSM_DBG_PRINTLN(") -> 100% duty, extended timing");
-         } else {
-           // Moderately wet or borderline - standard cooling
-           motorSetDutyPercent(0, 80);  // 80% motor duty
-           g_coolingMotorDurationMs[0] = DRY_COOL_MS_BASE;  // Standard duration (120s)
-           FSM_DBG_PRINT("SUB1 COOLING: Moderate dryness (diff=");
-           FSM_DBG_PRINT(coolingDiff);
-           FSM_DBG_PRINTLN(") -> 80% duty, standard timing");
-         }
-         
-         g_subCoolingStartMs[0] = millis();
-         g_coolingLocked[0] = true;
-         g_coolingEarlyExit[0] = false;
+         startCoolingPhase(0, false);
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: leaving COOLING"); /* leaving cooling */
@@ -419,6 +476,7 @@ static void setupStateMachines() {
          // Reset peak detection for new WET cycle
          g_peakDetected[1] = false;
          g_peakDetectedMs[1] = 0;
+         g_coolingRetryCount[1] = 0;  // Reset cooling retries for new cycle
        },
        []() {
          FSM_DBG_PRINTLN("SUB2 EXIT: WET -> resetting PID and releasing lock");
@@ -433,30 +491,7 @@ static void setupStateMachines() {
       {SubState::S_COOLING,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING");
-         heaterRun(1, false);
-         
-         // Adaptive COOLING: Adjust motor duty based on current moisture level
-         float coolingDiff = g_dhtAHDiff[1];
-         
-         if (coolingDiff > 2.0f) {
-           // Very wet shoe - aggressive drying
-           motorSetDutyPercent(1, 100);  // 100% motor duty
-           g_coolingMotorDurationMs[1] = DRY_COOL_MS_WET;  // Extended duration (180s)
-           FSM_DBG_PRINT("SUB2 COOLING: Very wet (diff=");
-           FSM_DBG_PRINT(coolingDiff);
-           FSM_DBG_PRINTLN(") -> 100% duty, extended timing");
-         } else {
-           // Moderately wet or borderline - standard cooling
-           motorSetDutyPercent(1, 80);  // 80% motor duty
-           g_coolingMotorDurationMs[1] = DRY_COOL_MS_BASE;  // Standard duration (120s)
-           FSM_DBG_PRINT("SUB2 COOLING: Moderate dryness (diff=");
-           FSM_DBG_PRINT(coolingDiff);
-           FSM_DBG_PRINTLN(") -> 80% duty, standard timing");
-         }
-         
-         g_subCoolingStartMs[1] = millis();
-         g_coolingLocked[1] = true;
-         g_coolingEarlyExit[1] = false;
+         startCoolingPhase(1, false);
        },
        []() { FSM_DBG_PRINTLN("SUB2 EXIT: leaving COOLING"); }},
       {SubState::S_DRY,
@@ -637,33 +672,44 @@ static void setupStateMachines() {
         }
       }
       
-      // Peak detection logic (only if minimum time not reached OR continuing detection)
-      if (g_ahRateSampleCount[0] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
-        // Calculate rate-of-change (second derivative)
-        float rateChange = currentRate - g_prevAHRate[0];
-        FSM_DBG_PRINT("SUB1: WET AH rate=");
-        FSM_DBG_PRINT(currentRate);
-        FSM_DBG_PRINT(" prev=");
-        FSM_DBG_PRINT(g_prevAHRate[0]);
-        FSM_DBG_PRINT(" change=");
-        FSM_DBG_PRINTLN(rateChange);
-        
-        // Track consecutive negative samples to avoid false positives
-        if (rateChange < AH_RATE_DECLINE_THRESHOLD) {
-          g_consecutiveNegativeCount[0]++;
-          FSM_DBG_PRINT("SUB1: Negative rate change detected, consecutive count: ");
-          FSM_DBG_PRINTLN(g_consecutiveNegativeCount[0]);
-        } else {
-          g_consecutiveNegativeCount[0] = 0;  // Reset on positive change
-        }
-        
-        // Detect peak: need MIN_CONSECUTIVE_NEGATIVE (3) consecutive declines
-        if (g_ahRateSampleCount[0] >= MIN_AH_RATE_SAMPLES && 
-            g_consecutiveNegativeCount[0] >= MIN_CONSECUTIVE_NEGATIVE) {
-          FSM_DBG_PRINTLN("SUB1: WET peak evaporation detected (declining rate) -> entering post-peak buffer");
-          g_peakDetected[0] = true;
-          g_peakDetectedMs[0] = now;
-          g_consecutiveNegativeCount[0] = 0;  // Reset for next detection
+      // Peak detection using moving-average decline
+      if (wetElapsed >= AH_ACCEL_WARMUP_MS) {
+        // Update rate history buffer
+        g_rateHistory[0][g_rateHistoryIdx[0]] = currentRate;
+        g_rateHistoryIdx[0] = (g_rateHistoryIdx[0] + 1) % 8;
+        if (g_rateHistoryCount[0] < 8) g_rateHistoryCount[0]++;
+
+        if (g_rateHistoryCount[0] >= 6) { // need enough samples
+          // Compute averages for two windows: recent (last 3) vs previous (prior 3)
+          float recentAvg = 0.0f, previousAvg = 0.0f;
+          // Indices for last 3 samples
+          int i2 = (g_rateHistoryIdx[0] - 1 + 8) % 8;
+          int i1 = (g_rateHistoryIdx[0] - 2 + 8) % 8;
+          int i0 = (g_rateHistoryIdx[0] - 3 + 8) % 8;
+          // Indices for previous 3 samples
+          int j2 = (g_rateHistoryIdx[0] - 4 + 8) % 8;
+          int j1 = (g_rateHistoryIdx[0] - 5 + 8) % 8;
+          int j0 = (g_rateHistoryIdx[0] - 6 + 8) % 8;
+          recentAvg = (g_rateHistory[0][i0] + g_rateHistory[0][i1] + g_rateHistory[0][i2]) / 3.0f;
+          previousAvg = (g_rateHistory[0][j0] + g_rateHistory[0][j1] + g_rateHistory[0][j2]) / 3.0f;
+
+          float avgChange = recentAvg - previousAvg;
+          FSM_DBG_PRINT("SUB1: WET avg recent="); FSM_DBG_PRINT(recentAvg);
+          FSM_DBG_PRINT(" prevAvg="); FSM_DBG_PRINT(previousAvg);
+          FSM_DBG_PRINT(" avgChange="); FSM_DBG_PRINTLN(avgChange);
+
+          if (avgChange < AH_RATE_DECLINE_THRESHOLD) {
+            g_consecutiveNegativeCount[0]++;
+          } else {
+            g_consecutiveNegativeCount[0] = 0;
+          }
+
+          if (g_consecutiveNegativeCount[0] >= MIN_CONSECUTIVE_NEGATIVE) {
+            FSM_DBG_PRINTLN("SUB1: WET peak evaporation (avg decline) -> entering post-peak buffer");
+            g_peakDetected[0] = true;
+            g_peakDetectedMs[0] = now;
+            g_consecutiveNegativeCount[0] = 0;
+          }
         }
       }
       g_prevAHRate[0] = currentRate;
@@ -734,35 +780,43 @@ static void setupStateMachines() {
         }
       }
       
-      // Peak detection logic (only if minimum time not reached OR continuing detection)
-      if (g_ahRateSampleCount[1] > 0 && wetElapsed >= AH_ACCEL_WARMUP_MS) {
-          // Calculate rate-of-change (second derivative)
-          float rateChange = currentRate - g_prevAHRate[1];
-          FSM_DBG_PRINT("SUB2: WET AH rate=");
-          FSM_DBG_PRINT(currentRate);
-          FSM_DBG_PRINT(" prev=");
-          FSM_DBG_PRINT(g_prevAHRate[1]);
-          FSM_DBG_PRINT(" change=");
-          FSM_DBG_PRINTLN(rateChange);
-          
-          // Track consecutive negative samples to avoid false positives
-          if (rateChange < AH_RATE_DECLINE_THRESHOLD) {
+      // Peak detection using moving-average decline
+      if (wetElapsed >= AH_ACCEL_WARMUP_MS) {
+        // Update rate history buffer
+        g_rateHistory[1][g_rateHistoryIdx[1]] = currentRate;
+        g_rateHistoryIdx[1] = (g_rateHistoryIdx[1] + 1) % 8;
+        if (g_rateHistoryCount[1] < 8) g_rateHistoryCount[1]++;
+
+        if (g_rateHistoryCount[1] >= 6) {
+          float recentAvg = 0.0f, previousAvg = 0.0f;
+          int i2 = (g_rateHistoryIdx[1] - 1 + 8) % 8;
+          int i1 = (g_rateHistoryIdx[1] - 2 + 8) % 8;
+          int i0 = (g_rateHistoryIdx[1] - 3 + 8) % 8;
+          int j2 = (g_rateHistoryIdx[1] - 4 + 8) % 8;
+          int j1 = (g_rateHistoryIdx[1] - 5 + 8) % 8;
+          int j0 = (g_rateHistoryIdx[1] - 6 + 8) % 8;
+          recentAvg = (g_rateHistory[1][i0] + g_rateHistory[1][i1] + g_rateHistory[1][i2]) / 3.0f;
+          previousAvg = (g_rateHistory[1][j0] + g_rateHistory[1][j1] + g_rateHistory[1][j2]) / 3.0f;
+
+          float avgChange = recentAvg - previousAvg;
+          FSM_DBG_PRINT("SUB2: WET avg recent="); FSM_DBG_PRINT(recentAvg);
+          FSM_DBG_PRINT(" prevAvg="); FSM_DBG_PRINT(previousAvg);
+          FSM_DBG_PRINT(" avgChange="); FSM_DBG_PRINTLN(avgChange);
+
+          if (avgChange < AH_RATE_DECLINE_THRESHOLD) {
             g_consecutiveNegativeCount[1]++;
-            FSM_DBG_PRINT("SUB2: Negative rate change detected, consecutive count: ");
-            FSM_DBG_PRINTLN(g_consecutiveNegativeCount[1]);
           } else {
-            g_consecutiveNegativeCount[1] = 0;  // Reset on positive change
+            g_consecutiveNegativeCount[1] = 0;
           }
-          
-          // Detect peak: need MIN_CONSECUTIVE_NEGATIVE (3) consecutive declines
-          if (g_ahRateSampleCount[1] >= MIN_AH_RATE_SAMPLES && 
-              g_consecutiveNegativeCount[1] >= MIN_CONSECUTIVE_NEGATIVE) {
-            FSM_DBG_PRINTLN("SUB2: WET peak evaporation detected (declining rate) -> entering post-peak buffer");
+
+          if (g_consecutiveNegativeCount[1] >= MIN_CONSECUTIVE_NEGATIVE) {
+            FSM_DBG_PRINTLN("SUB2: WET peak evaporation (avg decline) -> entering post-peak buffer");
             g_peakDetected[1] = true;
             g_peakDetectedMs[1] = now;
-            g_consecutiveNegativeCount[1] = 0;  // Reset for next detection
+            g_consecutiveNegativeCount[1] = 0;
           }
         }
+      }
         g_prevAHRate[1] = currentRate;
         g_ahRateSampleCount[1]++;
       }
@@ -812,19 +866,38 @@ static void setupStateMachines() {
     // Phase 2: stabilization (check if stabilization period elapsed)
     uint32_t stabilizeElapsed = (uint32_t)(millis() - g_subCoolingStabilizeStartMs[0]);
     if (stabilizeElapsed < DRY_STABILIZE_MS) {
+      // Sample AH diff every 15 seconds during stabilization
+      static uint32_t lastSampleMs0 = 0;
+      if (stabilizeElapsed - lastSampleMs0 >= 15000 || lastSampleMs0 == 0) {
+        lastSampleMs0 = stabilizeElapsed;
+        g_coolingDiffSamples[0][g_coolingDiffSampleIdx[0]] = g_dhtAHDiff[0];
+        g_coolingDiffSampleIdx[0] = (g_coolingDiffSampleIdx[0] + 1) % 6;
+        if (g_coolingDiffSampleCount[0] < 6) g_coolingDiffSampleCount[0]++;
+      }
       return; // Still in stabilization phase
     }
     
-    // Stabilization complete, perform dry-check
+    // Stabilization complete, perform dry-check with adaptive threshold
     float diff = g_dhtAHDiff[0];
-    bool stillWet = (diff > AH_DRY_THRESHOLD);
+    bool isDeclining = isAHDiffDeclining(0);
+    float threshold = isDeclining ? AH_DRY_THRESHOLD_LENIENT : AH_DRY_THRESHOLD;
+    bool stillWet = (diff > threshold);
     FSM_DBG_PRINT("SUB1: COOLING stabilization done -> dry-check, diff=");
-    FSM_DBG_PRINTLN(diff);
+    FSM_DBG_PRINT(diff);
+    FSM_DBG_PRINT(isDeclining ? " (declining, lenient threshold=" : " (threshold=");
+    FSM_DBG_PRINT(threshold);
+    FSM_DBG_PRINTLN(")");
     g_subCoolingStartMs[0] = 0;
     g_subCoolingStabilizeStartMs[0] = 0;
     g_coolingLocked[0] = false;
     if (stillWet) {
-      FSM_DBG_PRINTLN("SUB1: COOLING dry-check -> still wet, returning to WAITING");
+      if (g_coolingRetryCount[0] < 1) {
+        g_coolingRetryCount[0]++;
+        FSM_DBG_PRINTLN("SUB1: COOLING dry-check -> still wet, retrying cooling before re-queue");
+        startCoolingPhase(0, true);
+        return;
+      }
+      FSM_DBG_PRINTLN("SUB1: COOLING dry-check -> still wet after retry, returning to WAITING");
       fsmSub1.handleEvent(Event::DryCheckFailed);
     } else {
       FSM_DBG_PRINTLN("SUB1: COOLING dry-check -> dry, advancing to DRY");
@@ -871,19 +944,38 @@ static void setupStateMachines() {
     // Phase 2: stabilization (check if stabilization period elapsed)
     uint32_t stabilizeElapsed = (uint32_t)(millis() - g_subCoolingStabilizeStartMs[1]);
     if (stabilizeElapsed < DRY_STABILIZE_MS) {
+      // Sample AH diff every 15 seconds during stabilization
+      static uint32_t lastSampleMs1 = 0;
+      if (stabilizeElapsed - lastSampleMs1 >= 15000 || lastSampleMs1 == 0) {
+        lastSampleMs1 = stabilizeElapsed;
+        g_coolingDiffSamples[1][g_coolingDiffSampleIdx[1]] = g_dhtAHDiff[1];
+        g_coolingDiffSampleIdx[1] = (g_coolingDiffSampleIdx[1] + 1) % 6;
+        if (g_coolingDiffSampleCount[1] < 6) g_coolingDiffSampleCount[1]++;
+      }
       return; // Still in stabilization phase
     }
     
-    // Stabilization complete, perform dry-check
+    // Stabilization complete, perform dry-check with adaptive threshold
     float diff = g_dhtAHDiff[1];
-    bool stillWet = (diff > AH_DRY_THRESHOLD);
+    bool isDeclining = isAHDiffDeclining(1);
+    float threshold = isDeclining ? AH_DRY_THRESHOLD_LENIENT : AH_DRY_THRESHOLD;
+    bool stillWet = (diff > threshold);
     FSM_DBG_PRINT("SUB2: COOLING stabilization done -> dry-check, diff=");
-    FSM_DBG_PRINTLN(diff);
+    FSM_DBG_PRINT(diff);
+    FSM_DBG_PRINT(isDeclining ? " (declining, lenient threshold=" : " (threshold=");
+    FSM_DBG_PRINT(threshold);
+    FSM_DBG_PRINTLN(")");
     g_subCoolingStartMs[1] = 0;
     g_subCoolingStabilizeStartMs[1] = 0;
     g_coolingLocked[1] = false;
     if (stillWet) {
-      FSM_DBG_PRINTLN("SUB2: COOLING dry-check -> still wet, returning to WAITING");
+      if (g_coolingRetryCount[1] < 1) {
+        g_coolingRetryCount[1]++;
+        FSM_DBG_PRINTLN("SUB2: COOLING dry-check -> still wet, retrying cooling before re-queue");
+        startCoolingPhase(1, true);
+        return;
+      }
+      FSM_DBG_PRINTLN("SUB2: COOLING dry-check -> still wet after retry, returning to WAITING");
       fsmSub2.handleEvent(Event::DryCheckFailed);
     } else {
       FSM_DBG_PRINTLN("SUB2: COOLING dry-check -> dry, advancing to DRY");

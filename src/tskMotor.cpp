@@ -219,23 +219,33 @@ static void motorTask(void * /*pv*/) {
         motorSetDutyPercent(i, PID_FIXED_DUTY_PERCENT);
         pidOutputs[i] = PID_FIXED_DUTY_PERCENT / 100.0;  // Store for logging
       } else {
-        // Phase 2: PID control based on AH rate-of-change
-        
+        // Phase 2: PID control with dual setpoints and adaptive switching
+
         // Initialize PID on first run in this phase
         if (!g_pidInitialized[i]) {
           g_motorPID[i].setMode(PIDcontrol::AUTOMATIC);
+          g_motorPID[i].setSetpoint(TARGET_AH_RATE_EVAP); // Start with aggressive evaporation target
           g_pidInitialized[i] = true;
           DEV_DBG_PRINT("PID: activated for shoe ");
           DEV_DBG_PRINTLN(i);
         }
-        
-        // Use already-calculated AH rate from above
-        // Compute PID output (already limited to PID_OUT_MIN-PID_OUT_MAX: 0.5-1.0)
+
+        // Determine which phase setpoint to use based on elapsed time and measured rate
+        bool usePhase1 = (wetElapsed - PID_CONTROL_START_MS) < PID_PHASE1_MIN_MS;
+        double currentSetpoint = TARGET_AH_RATE_EVAP;
+        if (!usePhase1) {
+          // After minimum Phase 1 time, if rate has fallen below threshold, switch to stabilization target
+          if (ahRates[i] < AH_RATE_PHASE_THRESHOLD) {
+            currentSetpoint = TARGET_AH_RATE_STABLE;
+          }
+        }
+        g_motorPID[i].setSetpoint(currentSetpoint);
+
+        // Compute PID output (limited to PID_OUT_MIN-PID_OUT_MAX: 0.5-1.0)
         pidOutputs[i] = g_motorPID[i].compute(ahRates[i]);
-        
-        // Convert to duty percent (pidOutput is 0.5-1.0, so multiply by 100 for 50-100%)
+
+        // Convert to duty percent
         int dutyPercent = (int)round(pidOutputs[i] * 100.0);
-        
         motorSetDutyPercent(i, dutyPercent);
       }
     }
