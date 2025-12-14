@@ -14,11 +14,11 @@
 
 ### Core Improvements
 - [/] **UV delay after DRY** - 3s wait before UV starts (sensor settling)
-- [ ] **PID saturation recovery** - Detect motor stuck at 100%, adjust setpoint
-- [ ] **Adaptive heater warmup** - Reduce from 10s if shoe already warm
+- [/] **PID saturation recovery** - Detect motor stuck at 100%, adjust setpoint
+- [/] **Adaptive heater warmup** - Reduce from 10s if shoe already warm
 
 ### Data & Logging
-- [ ] **JSON PID logging** - Structured format (timestamp, setpoint, rate, duty, error)
+- [/] **JSON PID logging** - Structured format (timestamp, setpoint, rate, duty, error)
 - [ ] **State transition logs** - Clean state change records with timing
 - [ ] **Readable debug output** - Cleaner serial format for analysis
 
@@ -30,11 +30,11 @@
 ### Performance Tuning
 - [ ] **Threshold learning** - Auto-adjust dry-check thresholds per shoe type
 - [ ] **Power optimization** - Reduce motor duty during low-battery
-- [ ] **Heater efficiency** - Disable heater earlier if peak detected sooner
+- [/] **Heater efficiency** - Disable heater earlier if peak detected sooner
 
 ### UI & Monitoring
-- [ ] **OLED Retouch** - Oled Retouch
-- [ ] **OLED progress display** - Show current phase + % completion estimate
+- [/] **OLED Retouch** - Oled Retouch
+- [/] **OLED progress display** - Show current phase + % completion estimate
 - [/] **Temperature integration** - Collect & log shoe internal temp
 
 ---

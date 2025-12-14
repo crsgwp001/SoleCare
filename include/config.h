@@ -15,8 +15,25 @@ constexpr float MAX_AH_DELTA_PER_SAMPLE = 2.0f;
 // ==================== TIMING ====================
 constexpr uint32_t DONE_TIMEOUT_MS = 10u * 1000u;
 constexpr uint32_t WET_TIMEOUT_MS = 5u * 1000u;
-constexpr uint32_t WET_MIN_DURATION_MS = 360u * 1000u;  // Minimum 6 minutes of WET phase (aggressive heater-on evaporation)
-constexpr uint32_t WET_PEAK_BUFFER_MS = 75u * 1000u;  // Extra 75s buffer after peak detected for additional drying
+
+// Adaptive WET duration tiers based on initial moisture level
+// This balances drying effectiveness with energy efficiency
+constexpr uint32_t WET_BARELY_WET_MS = 180u * 1000u;         // Barely wet (0.7-1.5): 3 minutes
+constexpr uint32_t WET_MODERATE_MS = 360u * 1000u;           // Moderate (1.5-3.5): 6 minutes
+constexpr uint32_t WET_VERY_WET_MS = 480u * 1000u;           // Very wet (3.5-5.0): 8 minutes
+constexpr uint32_t WET_SOAKED_MS = 600u * 1000u;             // Soaked (5.0+): 10 minutes
+
+// Corresponding post-peak buffer durations
+constexpr uint32_t WET_BUFFER_BARELY_WET_MS = 40u * 1000u;   // 40 seconds for barely wet
+constexpr uint32_t WET_BUFFER_MODERATE_MS = 75u * 1000u;     // 75 seconds for moderate
+constexpr uint32_t WET_BUFFER_VERY_WET_MS = 100u * 1000u;    // 100 seconds for very wet
+constexpr uint32_t WET_BUFFER_SOAKED_MS = 120u * 1000u;      // 120 seconds for soaked
+
+// Thresholds for moisture classification
+constexpr float AH_DIFF_BARELY_WET = 1.5f;                   // g/m³
+constexpr float AH_DIFF_MODERATE_WET = 3.5f;                 // g/m³
+constexpr float AH_DIFF_VERY_WET = 5.0f;                     // g/m³
+
 constexpr uint32_t DRY_COOL_MS_BASE = 90u * 1000u;  // Base COOLING motor duration (reduced - most work done in WET)
 constexpr uint32_t DRY_COOL_MS_WET = 150u * 1000u;  // Extended COOLING motor duration (reduced)
 constexpr uint32_t DRY_COOL_MS_SOAKED = 180u * 1000u;  // Extended COOLING motor duration (reduced)
@@ -24,7 +41,26 @@ constexpr uint32_t DRY_STABILIZE_MS = 90u * 1000u;  // Stabilization phase after
 constexpr uint32_t MOTOR_SAFETY_MS = 600u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
 constexpr uint32_t HEATER_WARMUP_MS = 10u * 1000u;
+// Adaptive heater warmup thresholds (override base when shoe already warm)
+constexpr float HEATER_WARMUP_FAST_35C = 35.0f;   // very warm shoe
+constexpr float HEATER_WARMUP_FAST_30C = 30.0f;   // warm shoe
+constexpr float HEATER_WARMUP_FAST_25C = 25.0f;   // mildly warm
+constexpr uint32_t HEATER_WARMUP_35C_MS = 3u * 1000u;
+constexpr uint32_t HEATER_WARMUP_30C_MS = 5u * 1000u;
+constexpr uint32_t HEATER_WARMUP_25C_MS = 7u * 1000u;
+// Heater efficiency cutoffs
+// Bang-bang heater control thresholds for WET phase
+constexpr float HEATER_MAX_TEMP_C = 39.0f;        // OFF at >= 39°C (aligned with smart controller)
+constexpr float HEATER_REENABLE_TEMP_C = 39.0f;   // ON at <= 39°C (single-threshold controller uses trend)
+constexpr bool HEATER_EARLY_OFF_ON_PEAK = true;   // disable heater when evaporation peak detected
 constexpr uint32_t AH_ACCEL_WARMUP_MS = 180u * 1000u;  // Wait 3mins before checking AH acceleration for WET exit
+
+// Robustness thresholds for WET phase exit
+constexpr float AH_RATE_NORMAL_PEAK_THRESHOLD = 0.35f;    // Peak must have rate < this for normal loads (g/m³/min)
+constexpr float AH_RATE_WET_PEAK_THRESHOLD = 0.60f;       // Peak must have rate < this for very wet (5+ g/m³) shoes
+constexpr uint32_t AH_PEAK_NORMAL_MIN_TIME_MS = 120u * 1000u;  // Normal shoes: require 120s before peak valid
+constexpr uint32_t AH_PEAK_WET_MIN_TIME_MS = 240u * 1000u;     // Very wet shoes: require 240s before peak valid (4 min)
+constexpr float AH_DIFF_SAFETY_MARGIN = 0.5f;             // Safety check: AH diff must still be > this to exit WET
 
 // ==================== PID MOTOR CONTROL ====================
 // Phase 1: P-only control with fixed setpoint and logging
@@ -48,6 +84,12 @@ constexpr double TARGET_AH_RATE_EVAP = 0.45;     // Phase 2A: Aggressive evapora
 constexpr double TARGET_AH_RATE_STABLE = 0.08;   // Phase 2B: Gentle stabilization target (increased slightly)
 constexpr double AH_RATE_PHASE_THRESHOLD = 0.25; // Switch from EVAP to STABLE when rate < 0.25 (tighter)
 constexpr unsigned long PID_PHASE1_MIN_MS = 120000; // Ensure at least 120s in Phase 1 before switching
+
+// Saturation recovery parameters
+constexpr unsigned long PID_SAT_DETECT_MS = 15000;   // 15s continuously at ~max duty triggers recovery
+constexpr double PID_SAT_DUTY_THRESH = 0.98;         // consider saturated when output >= 98% (and duty ~100%)
+constexpr double PID_SAT_ERR_THRESH = 0.12;          // if setpoint - measured rate > 0.12, treat as not achievable
+constexpr double PID_SAT_MARGIN = 0.05;              // reduce setpoint to measured + margin during recovery
 
 // ==================== GPIO PINS ====================
 // Sensors

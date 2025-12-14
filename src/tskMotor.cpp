@@ -50,6 +50,8 @@ static float g_lastAH[2] = {0.0f, 0.0f};           // For AH rate calculation
 static unsigned long g_lastAHTime[2] = {0, 0};     // Timestamp of last AH sample
 static float g_lastValidRate[2] = {0.0f, 0.0f};    // Store last calculated rate for consistency
 static bool g_rateInitialized[2] = {false, false}; // Track if we have first valid rate
+// Saturation recovery tracking
+static unsigned long g_satStartMs[2] = {0, 0};
 
 static inline void setActuator(int pin, bool on) {
   digitalWrite(pin, (HW_ACTUATOR_ACTIVE_LOW) ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
@@ -168,7 +170,9 @@ static void motorTask(void * /*pv*/) {
         g_heaterOn[i] = msg.on;
         setHeaterRelay(i, msg.on);
         DEV_DBG_PRINT("MOTOR: set heater on=");
-        DEV_DBG_PRINTLN(msg.on);
+        DEV_DBG_PRINT(msg.on);
+        DEV_DBG_PRINT(" idx=");
+        DEV_DBG_PRINTLN(i);
         break;
       case MotorCmd::SetDutyPct: {
         int pct = msg.value;
@@ -178,6 +182,8 @@ static void motorTask(void * /*pv*/) {
           pct = 100;
         int tgt = (MOTOR_PWM_MAX * pct) / 100;
         g_motorTargetDuty[i] = tgt;
+        // Apply duty immediately (CRITICAL: for COOLING phase motor control)
+        setMotorPWM(i, tgt);
         // Only log significant duty changes (>5% change)
         if (g_motorDuty[i] == 0 || abs(tgt - g_motorDuty[i]) > (MOTOR_PWM_MAX * 5 / 100)) {
           DEV_DBG_PRINT("MOTOR: set duty %=");
@@ -239,6 +245,28 @@ static void motorTask(void * /*pv*/) {
             currentSetpoint = TARGET_AH_RATE_STABLE;
           }
         }
+        // Saturation recovery: if at max duty/output and error large for sustained time, lower setpoint
+        double curOut = pidOutputs[i];
+        int curDutyPct = getMotorDutyCycle(i);
+        bool saturated = (curOut >= PID_SAT_DUTY_THRESH) || (curDutyPct >= 99);
+        double err = currentSetpoint - ahRates[i];
+        unsigned long nowMs = millis();
+        if (saturated && err > PID_SAT_ERR_THRESH) {
+          if (g_satStartMs[i] == 0) g_satStartMs[i] = nowMs;
+        } else {
+          g_satStartMs[i] = 0;
+        }
+        if (g_satStartMs[i] != 0 && (nowMs - g_satStartMs[i]) >= PID_SAT_DETECT_MS) {
+          double achievableSp = ahRates[i] + PID_SAT_MARGIN;
+          if (achievableSp < TARGET_AH_RATE_STABLE) achievableSp = TARGET_AH_RATE_STABLE;
+          currentSetpoint = min(currentSetpoint, achievableSp);
+          DEV_DBG_PRINT("PID: sat shoe ");
+          DEV_DBG_PRINT(i);
+          DEV_DBG_PRINT(" out="); DEV_DBG_PRINT(curOut, 3);
+          DEV_DBG_PRINT(" duty="); DEV_DBG_PRINT(curDutyPct);
+          DEV_DBG_PRINT(" rate="); DEV_DBG_PRINT(ahRates[i], 3);
+          DEV_DBG_PRINT(" sp->"); DEV_DBG_PRINTLN(currentSetpoint, 3);
+        }
         g_motorPID[i].setSetpoint(currentSetpoint);
 
         // Compute PID output (limited to PID_OUT_MIN-PID_OUT_MAX: 0.5-1.0)
@@ -258,13 +286,24 @@ static void motorTask(void * /*pv*/) {
         // Get current shoe states
         SubState sub0State = getSub1State();
         SubState sub1State = getSub2State();
+        // Current setpoints
+        double sp0 = g_motorPID[0].getSetpoint();
+        double sp1 = g_motorPID[1].getSetpoint();
+        // Duty and heater
+        int d0 = getMotorDutyCycle(0);
+        int d1 = getMotorDutyCycle(1);
+        bool h0 = heaterIsOn(0);
+        bool h1 = heaterIsOn(1);
+        // Saturation flags (at log time)
+        bool sat0 = ((pidOutputs[0] >= PID_SAT_DUTY_THRESH) || (d0 >= 99)) && ((sp0 - ahRates[0]) > PID_SAT_ERR_THRESH);
+        bool sat1 = ((pidOutputs[1] >= PID_SAT_DUTY_THRESH) || (d1 >= 99)) && ((sp1 - ahRates[1]) > PID_SAT_ERR_THRESH);
         
         // Log comprehensive data: AH values, temps, diffs, states, rates, PID outputs
         pidLogData(
           g_dhtAH_ema[0], g_dhtAH_ema[1], g_dhtAH_ema[2],       // AH0, AH1, AH2
           g_dhtTemp[1], g_dhtTemp[2],                           // Shoe temperatures (sensor1, sensor2)
-          g_dhtAHDiff_ema[0], sub0State, ahRates[0], pidOutputs[0] * 100.0,  // Shoe 0
-          g_dhtAHDiff_ema[1], sub1State, ahRates[1], pidOutputs[1] * 100.0   // Shoe 1
+          g_dhtAHDiff_ema[0], sub0State, ahRates[0], pidOutputs[0] * 100.0, sp0,  // Shoe 0
+          g_dhtAHDiff_ema[1], sub1State, ahRates[1], pidOutputs[1] * 100.0, sp1   // Shoe 1
         );
         lastLogMs = now;
       }

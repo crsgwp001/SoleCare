@@ -16,29 +16,115 @@ static constexpr int MAX_NAN_STREAK = 3;  // After this, reuse last valid AH
 // Track last valid EMA for rate-of-change limiting (EMI protection)
 static float g_lastValidEMA[3] = {NAN, NAN, NAN};
 
+// Track last valid temperature for EMI failure recovery
+static float g_lastValidTemp[3] = {NAN, NAN, NAN};
+static int g_tempFailStreak[3] = {0, 0, 0};
+static constexpr int MAX_TEMP_FAIL_STREAK = 3;  // Reject bad temps after a few fails
+
+// Track last valid humidity for EMI failure recovery
+static float g_lastValidHum[3] = {NAN, NAN, NAN};
+static int g_humFailStreak[3] = {0, 0, 0};
+
 static void vSensorTask(void * /*pvParameters*/) {
   sensor1.begin();
   sensor2.begin();
   sensor3.begin();
   while (true) {
     // 1) Raw reads + yield to avoid hogging interrupts
-    // Add small delays between reads to reduce EMI interference from motor PWM
+    // Add delays between reads to reduce EMI interference from motor PWM
+    // Extra care for sensor 0 (ambient) which is most susceptible to motor noise
+    
+    // Sensor 0 (ambient): Read with retry on failure
     g_dhtTemp[0] = sensor1.readTemperature();
-    vTaskDelay(pdMS_TO_TICKS(5));  // 5ms delay for EMI settling
+    vTaskDelay(pdMS_TO_TICKS(10));
+    if (isnan(g_dhtTemp[0]) || g_dhtTemp[0] == 0.0f) {
+      // Sensor 0 read failed, retry immediately
+      vTaskDelay(pdMS_TO_TICKS(15));
+      g_dhtTemp[0] = sensor1.readTemperature();
+    }
     g_dhtTemp[0] += 0.2f; // calibration
+    
     g_dhtHum[0] = sensor1.readHumidity();
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(10));
     g_dhtHum[0] += 2.0f;
+    
+    // Sensor 1 (shoe 1)
     g_dhtTemp[1] = sensor2.readTemperature();
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(8));
     g_dhtHum[1] = sensor2.readHumidity();
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(8));
+    
+    // Sensor 2 (shoe 2)
     g_dhtTemp[2] = sensor3.readTemperature();
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(8));
     g_dhtHum[2] = sensor3.readHumidity();
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(8));
 
-    // 2) Compute absolute humidity & EMA (skip/replace invalid reads to avoid NaN propagation)
+    // Validate temperature reads: reject NaN (0.00 after formatting) or unreasonable values
+    for (int i = 0; i < 3; ++i) {
+      // NaN check
+      if (isnan(g_dhtTemp[i])) {
+        g_tempFailStreak[i]++;
+        if (!isnan(g_lastValidTemp[i])) {
+          // Use last valid temp immediately on first NaN
+          g_dhtTemp[i] = g_lastValidTemp[i];
+        }
+        continue;
+      }
+      
+      // Reject physically impossible temps:
+      // - 0°C is almost never correct during normal operation (31°C shoes)
+      // - Out of valid range (-40 to 85°C)
+      if (g_dhtTemp[i] < -35.0f || g_dhtTemp[i] > 85.0f || 
+          (g_dhtTemp[i] < 10.0f && !isnan(g_lastValidTemp[i]) && g_lastValidTemp[i] > 20.0f)) {
+        // Out of range or sudden drop - likely EMI/read error
+        g_tempFailStreak[i]++;
+        if (!isnan(g_lastValidTemp[i])) {
+          // Hold last valid temp (EMI rejection)
+          g_dhtTemp[i] = g_lastValidTemp[i];
+        } else {
+          g_dhtTemp[i] = NAN;  // Mark invalid if we have no fallback
+        }
+      } else {
+        // Valid temp
+        g_tempFailStreak[i] = 0;
+        g_lastValidTemp[i] = g_dhtTemp[i];
+      }
+    }
+
+    // 2) Validate humidity reads: reject NaN or out-of-range values
+    for (int i = 0; i < 3; ++i) {
+      // NaN check
+      if (isnan(g_dhtHum[i])) {
+        g_humFailStreak[i]++;
+        if (!isnan(g_lastValidHum[i])) {
+          // Use last valid humidity immediately on first NaN
+          g_dhtHum[i] = g_lastValidHum[i];
+        }
+        continue;
+      }
+      
+      // Reject out-of-range or sudden jump values:
+      // - Valid humidity is 0-100%
+      // - Sudden jumps >30% = likely EMI
+      if (g_dhtHum[i] < 0.0f || g_dhtHum[i] > 100.0f ||
+          (!isnan(g_lastValidHum[i]) && fabs(g_dhtHum[i] - g_lastValidHum[i]) > 30.0f)) {
+        // Out of range or sudden spike - likely EMI/read error
+        g_humFailStreak[i]++;
+        if (!isnan(g_lastValidHum[i])) {
+          // Hold last valid humidity (EMI rejection)
+          g_dhtHum[i] = g_lastValidHum[i];
+        } else {
+          g_dhtHum[i] = NAN;  // Mark invalid if we have no fallback
+        }
+      } else {
+        // Valid humidity
+        g_humFailStreak[i] = 0;
+        g_lastValidHum[i] = g_dhtHum[i];
+      }
+    }
+
+    // 3) Compute absolute humidity & EMA (skip/replace invalid reads to avoid NaN propagation)
     for (int i = 0; i < 3; ++i) {
       float t = g_dhtTemp[i];
       float h = g_dhtHum[i];
@@ -90,7 +176,7 @@ static void vSensorTask(void * /*pvParameters*/) {
       }
     }
 
-    // 3) Compute raw diff + EMA diff + status (only when we have valid EMA values)
+    // 4) Compute raw diff + EMA diff + status (only when we have valid EMA values)
     for (int i = 1; i < 3; ++i) {
       if (isnan(g_dhtAH_ema[0]) || isnan(g_dhtAH_ema[i])) {
         // Skip this iteration if either ambient or shoe EMA is invalid
@@ -112,7 +198,7 @@ static void vSensorTask(void * /*pvParameters*/) {
       g_dhtIsWet[i - 1] = (diff > AH_WET_THRESHOLD);
     }
 
-    // 4) Debug prints
+    // 5) Debug prints
     DEV_DBG_PRINT("S0: ");
     DEV_DBG_PRINT(g_dhtTemp[0], 1);
     DEV_DBG_PRINT("C ");
@@ -143,7 +229,7 @@ static void vSensorTask(void * /*pvParameters*/) {
     DEV_DBG_PRINTLN(g_dhtIsWet[1] ? "WET" : "DRY");
     taskYIELD();
 
-    // 5) Delay to free CPU & reset task watchdog
+    // 6) Delay to free CPU & reset task watchdog
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }

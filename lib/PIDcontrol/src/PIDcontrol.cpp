@@ -50,7 +50,12 @@ double PIDcontrol::compute(double input) {
   double P = kp_ * error;
 
   // Integral term (trapezoidal approximation)
-  integral_ += 0.5 * (error + lastErr_) * (ki_ * (dt / 1000.0));
+  // Anti-windup freeze: if we're saturated at max and error would push higher, don't integrate
+  bool freezeUp = (output_ >= outMax_) && (error > 0);
+  bool freezeDown = (output_ <= outMin_) && (error < 0);
+  if (!freezeUp && !freezeDown) {
+    integral_ += 0.5 * (error + lastErr_) * (ki_ * (dt / 1000.0));
+  }
   integral_ = clamp(integral_, outMin_, outMax_); // anti-windup
 
   // Derivative on measurement to reduce derivative kick

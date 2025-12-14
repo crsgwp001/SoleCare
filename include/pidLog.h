@@ -7,8 +7,8 @@
 void pidLogInit();
 void pidLogData(float ah0, float ah1, float ah2,
                 float shoe0Temp, float shoe1Temp,
-                float shoe0AHDiff, SubState shoe0State, float shoe0AHRate, double shoe0PIDOut,
-                float shoe1AHDiff, SubState shoe1State, float shoe1AHRate, double shoe1PIDOut);
+                float shoe0AHDiff, SubState shoe0State, float shoe0AHRate, double shoe0PIDOut, double shoe0Setpoint,
+                float shoe1AHDiff, SubState shoe1State, float shoe1AHRate, double shoe1PIDOut, double shoe1Setpoint);
 
 #else
 
@@ -16,7 +16,7 @@ void pidLogData(float ah0, float ah1, float ah2,
 inline void pidLogInit() {}
 inline void pidLogData(float ah0, float ah1, float ah2,
                        float shoe0Temp, float shoe1Temp,
-                       float shoe0AHDiff, SubState shoe0State, float shoe0AHRate, double shoe0PIDOut,
-                       float shoe1AHDiff, SubState shoe1State, float shoe1AHRate, double shoe1PIDOut) {}
+                       float shoe0AHDiff, SubState shoe0State, float shoe0AHRate, double shoe0PIDOut, double shoe0Setpoint,
+                       float shoe1AHDiff, SubState shoe1State, float shoe1AHRate, double shoe1PIDOut, double shoe1Setpoint) {}
 
 #endif

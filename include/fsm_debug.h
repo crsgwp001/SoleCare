@@ -14,6 +14,13 @@
     if (Serial)                                                                                    \
       Serial.println(__VA_ARGS__);                                                                 \
   } while (0)
+#ifdef FSM_DEBUG_VERBOSE
+#define FSM_DBG_VPRINT(...) FSM_DBG_PRINT(__VA_ARGS__)
+#define FSM_DBG_VPRINTLN(...) FSM_DBG_PRINTLN(__VA_ARGS__)
+#else
+#define FSM_DBG_VPRINT(...) ((void)0)
+#define FSM_DBG_VPRINTLN(...) ((void)0)
+#endif
 #define FSM_DBG_PRINT_INT(prefix, v)                                                               \
   do {                                                                                             \
     if (Serial) {                                                                                  \

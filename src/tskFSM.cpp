@@ -77,11 +77,24 @@ static int g_coolingDiffSampleCount[2] = {0, 0};  // Number of samples collected
 constexpr int MIN_AH_RATE_SAMPLES = 5;  // Need at least this many samples before checking decline
 constexpr int MIN_CONSECUTIVE_NEGATIVE = 3;  // Need at least 3 consecutive negative samples to exit WET (robust to noise)
 constexpr float AH_RATE_DECLINE_THRESHOLD = -0.01f;  // Rate-of-change decline to trigger exit (g/m³/min²)
+// Additional robustness: for very wet shoes, require sustained decline over longer history
+constexpr int MIN_SAMPLES_FOR_DECLINE = 6;  // Track at least 6 samples before considering decline valid
+constexpr float AH_RATE_PEAK_MIN_THRESHOLD = 0.3f;  // Don't declare peak until rate drops below this (g/m³/min) - prevents early exit on very wet shoes
 // Track whether the UV timer expired while the sub was in the COOLING phase.
 static bool g_uvExpiredDuringCooling[2] = {false, false};
 // UV complete flag: set when a UV timer has finished for a sub. Prevents
 // restarting the UV timer on subsequent loops between cooling->wet.
 static bool g_uvComplete[2] = {false, false};
+// Track initial wetness per shoe to adapt minimum WET duration and peak criteria
+static float g_initialWetDiff[2] = {0.0f, 0.0f};
+static uint32_t g_wetMinDurationMs[2] = {WET_MODERATE_MS, WET_MODERATE_MS};  // Default to moderate; will be reassigned
+// Post-peak buffer duration (adaptive based on initial wetness)
+static uint32_t g_peakBufferMs[2] = {WET_BUFFER_MODERATE_MS, WET_BUFFER_MODERATE_MS};  // Default to moderate; will be reassigned
+// Track last AH diff during WET phase (for continuous monitoring)
+static float g_lastWetAHDiff[2] = {0.0f, 0.0f};
+// Prevent accidental early exit if AH diff jumps down (sensor noise)
+static uint32_t g_lastAHDiffCheckMs[2] = {0, 0};
+static float g_lastValidAHDiff[2] = {0.0f, 0.0f};  // Last stable AH diff reading
 // Protect g_uvComplete access since it's read from UI (core 0) and written by FSM (core 1)
 // (g_uvComplete is internal to FSM)
 
@@ -94,9 +107,108 @@ static int g_wetLockOwner = -1;
 // Guard to prevent repeated handleEvent in WAITING run callbacks (watchdog protection)
 static bool g_waitingEventPosted[2] = {false, false};
 
+// Helper: Classify wetness level and assign adaptive durations
+static void assignAdaptiveWETDurations(uint8_t idx, float ahDiff) {
+  if (ahDiff < AH_DIFF_BARELY_WET) {
+    // Barely wet - quick dry
+    g_wetMinDurationMs[idx] = WET_BARELY_WET_MS;
+    g_peakBufferMs[idx] = WET_BUFFER_BARELY_WET_MS;
+    FSM_DBG_PRINT("BARELY_WET");
+  } else if (ahDiff < AH_DIFF_MODERATE_WET) {
+    // Moderately wet - normal dry
+    g_wetMinDurationMs[idx] = WET_MODERATE_MS;
+    g_peakBufferMs[idx] = WET_BUFFER_MODERATE_MS;
+    FSM_DBG_PRINT("MODERATE_WET");
+  } else if (ahDiff < AH_DIFF_VERY_WET) {
+    // Very wet - extended dry
+    g_wetMinDurationMs[idx] = WET_VERY_WET_MS;
+    g_peakBufferMs[idx] = WET_BUFFER_VERY_WET_MS;
+    FSM_DBG_PRINT("VERY_WET");
+  } else {
+    // Soaked - full dry
+    g_wetMinDurationMs[idx] = WET_SOAKED_MS;
+    g_peakBufferMs[idx] = WET_BUFFER_SOAKED_MS;
+    FSM_DBG_PRINT("SOAKED");
+  }
+}
+
 static inline bool coolingMotorPhaseActive(int idx) {
   // Motor phase is active if cooling started and stabilization hasn't begun yet
   return (g_subCoolingStartMs[idx] != 0 && g_subCoolingStabilizeStartMs[idx] == 0);
+}
+
+// Compute adaptive heater warmup based on shoe temperature
+static uint32_t getAdaptiveWarmupMs(uint8_t idx) {
+  // Sensor indices: 0=ambient, 1=shoe0, 2=shoe1
+  float tempC = g_dhtTemp[idx + 1];
+  if (isnan(tempC)) return HEATER_WARMUP_MS;
+  if (tempC >= HEATER_WARMUP_FAST_35C) return HEATER_WARMUP_35C_MS;
+  if (tempC >= HEATER_WARMUP_FAST_30C) return HEATER_WARMUP_30C_MS;
+  if (tempC >= HEATER_WARMUP_FAST_25C) return HEATER_WARMUP_25C_MS;
+  return HEATER_WARMUP_MS;
+}
+
+// Early heater efficiency with smart trend-based control
+// Tracks temperature direction to prevent churn
+static float g_heaterLastTemp[2] = {NAN, NAN};
+static uint32_t g_heaterLastCheckMs[2] = {0, 0};
+static uint8_t g_heaterTrendSamples[2] = {0, 0};  // Count of temp samples to establish trend
+static bool g_heaterTempRising[2] = {false, false};  // true if temp is rising
+
+static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
+  // Smart bang-bang: OFF at 39°C, track trend (rising/falling), only turn ON if falling
+  // This prevents churn and lets residual heat help evaporate before reheating
+  
+  float tempC = g_dhtTemp[idx + 1];
+  if (isnan(tempC)) return;
+  
+  uint32_t now = millis();
+  
+  // ===== DETERMINE TEMPERATURE TREND (every 500ms) =====
+  if ((now - g_heaterLastCheckMs[idx]) >= 500) {
+    if (!isnan(g_heaterLastTemp[idx])) {
+      // Compare to previous reading
+      bool rising = (tempC > g_heaterLastTemp[idx]);
+      if (rising == g_heaterTempRising[idx]) {
+        // Same direction, accumulate confidence
+        if (g_heaterTrendSamples[idx] < 5) g_heaterTrendSamples[idx]++;
+      } else {
+        // Direction changed, reset confidence
+        g_heaterTempRising[idx] = rising;
+        g_heaterTrendSamples[idx] = 1;
+      }
+    }
+    g_heaterLastTemp[idx] = tempC;
+    g_heaterLastCheckMs[idx] = now;
+  }
+  
+  // ===== HEATER CONTROL =====
+  // OFF threshold: 39°C (single threshold, not hysteresis like before)
+  if (tempC >= 39.0f && heaterIsOn(idx)) {
+    FSM_DBG_VPRINT("SUB"); FSM_DBG_VPRINT(idx);
+    FSM_DBG_PRINT(": Heater OFF at ");
+    FSM_DBG_PRINT(tempC, 1);
+    FSM_DBG_VPRINTLN("°C (threshold reached, let residual heat evaporate)");
+    heaterRun(idx, false);
+    return;
+  }
+  
+  // ON condition: Turn ON only if temp is falling (not rising/stable)
+  // This prevents the heater from chasing upward or oscillating
+  if (!heaterIsOn(idx) && tempC < 39.0f) {
+    // Temperature below 39°C and heater is OFF
+    // Only turn ON if we have confidence that temp is FALLING
+    bool shouldTurnOn = (g_heaterTrendSamples[idx] >= 2) && !g_heaterTempRising[idx];
+    
+    if (shouldTurnOn) {
+      FSM_DBG_VPRINT("SUB"); FSM_DBG_VPRINT(idx);
+      FSM_DBG_PRINT(": Heater ON: temp ");
+      FSM_DBG_PRINT(tempC, 1);
+      FSM_DBG_VPRINTLN("°C falling, resuming until 39°C");
+      heaterRun(idx, true);
+      return;
+    }
+  }
 }
 
 // Check if AH diff is consistently declining during stabilization
@@ -124,40 +236,40 @@ static void startCoolingPhase(int idx, bool isRetry) {
 
   // Base selections - shorter since heavy lifting done in WET phase
   uint32_t durationMs = DRY_COOL_MS_BASE;
-  int dutyPercent = 80;
+  int dutyPercent = 70;  // Moderate circulation (was 80, reduced to 70 to prevent excessive reheating)
 
   if (coolingDiff > 2.0f) {
-    // Still very wet after extended WET: max cooling
-    dutyPercent = 100;
+    // Still very wet after extended WET: moderate cooling
+    dutyPercent = 75;  // Increased from 50-60 (was 100) - balance evaporation with preventing reheating
     durationMs = DRY_COOL_MS_SOAKED;  // 180s
-    FSM_DBG_PRINT(label);
-    FSM_DBG_PRINT(" COOLING: Still very wet (diff=");
-    FSM_DBG_PRINT(coolingDiff);
-    FSM_DBG_PRINTLN(") -> 100% duty, extended timing");
+    FSM_DBG_VPRINT(label);
+    FSM_DBG_VPRINT(" COOLING: Still very wet (diff=");
+    FSM_DBG_VPRINT(coolingDiff);
+    FSM_DBG_VPRINTLN(") -> 75% duty, extended timing");
   } else if (coolingDiff > 1.2f) {
-    // Moderately wet: standard cooling
-    dutyPercent = 90;
+    // Moderately wet: moderate cooling
+    dutyPercent = 72;  // Increased from 50-55 (was 90)
     durationMs = DRY_COOL_MS_WET;  // 150s
-    FSM_DBG_PRINT(label);
-    FSM_DBG_PRINT(" COOLING: Moderate (diff=");
-    FSM_DBG_PRINT(coolingDiff);
-    FSM_DBG_PRINTLN(") -> 90% duty, standard timing");
+    FSM_DBG_VPRINT(label);
+    FSM_DBG_VPRINT(" COOLING: Moderate (diff=");
+    FSM_DBG_VPRINT(coolingDiff);
+    FSM_DBG_VPRINTLN(") -> 72% duty, standard timing");
   } else {
-    // Nearly dry: light final cooling
-    dutyPercent = 80;
+    // Nearly dry: light circulation
+    dutyPercent = 70;  // Increased from 50 (was 80)
     durationMs = DRY_COOL_MS_BASE;  // 90s
-    FSM_DBG_PRINT(label);
-    FSM_DBG_PRINT(" COOLING: Nearly dry (diff=");
-    FSM_DBG_PRINT(coolingDiff);
-    FSM_DBG_PRINTLN(") -> 80% duty, base timing");
+    FSM_DBG_VPRINT(label);
+    FSM_DBG_VPRINT(" COOLING: Nearly dry (diff=");
+    FSM_DBG_VPRINT(coolingDiff);
+    FSM_DBG_VPRINTLN(") -> 70% duty, base timing");
   }
 
-  // Retry path: boost by one tier if not already maxed
+  // Retry path: moderate increase
   if (isRetry) {
-    if (dutyPercent < 100) dutyPercent = 100;
+    if (dutyPercent < 75) dutyPercent = 75;  // Cap at 75% to prevent excessive reheating
     if (durationMs < DRY_COOL_MS_WET) durationMs = DRY_COOL_MS_WET;  // Max 150s on retry
-    FSM_DBG_PRINT(label);
-    FSM_DBG_PRINTLN(" COOLING: Retry -> boosting to 100% duty, extended timing");
+    FSM_DBG_VPRINT(label);
+    FSM_DBG_VPRINTLN(" COOLING: Retry -> boosting to 75% duty, extended timing");
   }
 
   motorSetDutyPercent(idx, dutyPercent);
@@ -405,10 +517,19 @@ static void setupStateMachines() {
          motorSetDutyPercent(0, 0);
          heaterRun(0, true);
          g_subWetStartMs[0] = millis();
+         g_initialWetDiff[0] = g_dhtAHDiff[0];
+         assignAdaptiveWETDurations(0, g_initialWetDiff[0]);
+         g_lastValidAHDiff[0] = g_initialWetDiff[0];
+         g_lastAHDiffCheckMs[0] = g_subWetStartMs[0];
          // Reset peak detection for new WET cycle
          g_peakDetected[0] = false;
          g_peakDetectedMs[0] = 0;
          g_coolingRetryCount[0] = 0;  // Reset cooling retries for new cycle
+         FSM_DBG_PRINT("SUB1: WET entry ("); FSM_DBG_PRINT(g_initialWetDiff[0], 2);
+         FSM_DBG_PRINT("g/m³) -> ");
+         // (classification printed in helper function)
+         FSM_DBG_PRINT(", minDuration="); FSM_DBG_PRINT(g_wetMinDurationMs[0]/1000); FSM_DBG_PRINT("s, buffer="); 
+         FSM_DBG_PRINT(g_peakBufferMs[0]/1000); FSM_DBG_PRINTLN("s");
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: WET -> resetting PID and releasing lock");
@@ -474,10 +595,19 @@ static void setupStateMachines() {
          motorSetDutyPercent(1, 0);
          heaterRun(1, true);
          g_subWetStartMs[1] = millis();
+         g_initialWetDiff[1] = g_dhtAHDiff[1];
+         assignAdaptiveWETDurations(1, g_initialWetDiff[1]);
+         g_lastValidAHDiff[1] = g_initialWetDiff[1];
+         g_lastAHDiffCheckMs[1] = g_subWetStartMs[1];
          // Reset peak detection for new WET cycle
          g_peakDetected[1] = false;
          g_peakDetectedMs[1] = 0;
          g_coolingRetryCount[1] = 0;  // Reset cooling retries for new cycle
+         FSM_DBG_PRINT("SUB2: WET entry ("); FSM_DBG_PRINT(g_initialWetDiff[1], 2);
+         FSM_DBG_PRINT("g/m³) -> ");
+         // (classification printed in helper function)
+         FSM_DBG_PRINT(", minDuration="); FSM_DBG_PRINT(g_wetMinDurationMs[1]/1000); FSM_DBG_PRINT("s, buffer="); 
+         FSM_DBG_PRINT(g_peakBufferMs[1]/1000); FSM_DBG_PRINTLN("s");
        },
        []() {
          FSM_DBG_PRINTLN("SUB2 EXIT: WET -> resetting PID and releasing lock");
@@ -615,7 +745,7 @@ static void setupStateMachines() {
   fsmSub1.setRun(SubState::S_WET, []() {
     if (!g_motorStarted[0] && g_subWetStartMs[0] != 0) {
       uint32_t elapsed = (uint32_t)(millis() - g_subWetStartMs[0]);
-      if (elapsed >= HEATER_WARMUP_MS) {
+      if (elapsed >= getAdaptiveWarmupMs(0)) {
         FSM_DBG_PRINTLN("SUB1: WET warmup done -> start motor");
         motorStart(0);
         motorSetDutyPercent(0, 100);
@@ -626,6 +756,10 @@ static void setupStateMachines() {
         g_lastAHRateSampleMs[0] = millis();
         g_prevAHRate[0] = 0.0f;
       }
+    }
+    // Heater efficiency: evaluate early cutoff conditions
+    if (g_subWetStartMs[0] != 0) {
+      maybeEarlyHeaterOff(0, (uint32_t)(millis() - g_subWetStartMs[0]));
     }
     // Sample AH rate every 2 seconds and check for peak (declining rate)
     // But wait AH_ACCEL_WARMUP_MS (30s) after WET start before checking for decline
@@ -640,42 +774,70 @@ static void setupStateMachines() {
       
       g_lastAHRateSampleMs[0] = now;
       float currentRate = g_dhtAHRate[0];  // Use actual AH rate-of-change from motor control
+      float currentAHDiff = g_dhtAHDiff[0];  // Get current AH diff for safety checks
       
       // Validate rate before processing (reject NaN/Inf from sensor glitches)
       if (isnan(currentRate) || isinf(currentRate)) {
         return;  // Skip this sample, wait for next valid rate
       }
       
-      // Check if peak detected and buffer period active
+      // ==================== PEAK-DETECTED: IN POST-PEAK BUFFER PHASE ====================
       if (g_peakDetected[0]) {
         uint32_t bufferElapsed = (uint32_t)(now - g_peakDetectedMs[0]);
-        if (bufferElapsed < WET_PEAK_BUFFER_MS) {
-          // Still in post-peak buffer period - continue drying, don't exit
+        
+        // SAFETY CHECK: Verify AH diff hasn't dropped to unexpected low values (sensor noise/glitch)
+        if (!isnan(currentAHDiff) && currentAHDiff > 0.1f) {
+          g_lastValidAHDiff[0] = currentAHDiff;
+          g_lastAHDiffCheckMs[0] = now;
+        }
+        
+        // Still in post-peak buffer period
+        if (bufferElapsed < g_peakBufferMs[0]) {
+          // Continue monitoring evaporation during buffer
+          uint32_t bufferRemaining = g_peakBufferMs[0] - bufferElapsed;
           FSM_DBG_PRINT("SUB1: WET in post-peak buffer (");
-          FSM_DBG_PRINT(bufferElapsed);
-          FSM_DBG_PRINTLN("ms remaining)");
+          FSM_DBG_PRINT(bufferRemaining);
+          FSM_DBG_PRINT("ms remaining, diff=");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³)");
+          return;
+        }
+        
+        // Buffer period expired - check safety conditions before exiting to COOLING
+        uint32_t minDurationRemaining = (wetElapsed >= g_wetMinDurationMs[0]) ? 0 : (g_wetMinDurationMs[0] - wetElapsed);
+        
+        // SAFETY: Require AH diff to still be reasonable (not accidental low reading)
+        bool safeAHLevel = (currentAHDiff > AH_DIFF_SAFETY_MARGIN) || (g_lastValidAHDiff[0] > AH_DIFF_SAFETY_MARGIN + 0.2f);
+        bool minDurationMet = (minDurationRemaining == 0);
+        
+        if (minDurationMet && safeAHLevel) {
+          FSM_DBG_PRINT("SUB1: WET peak + buffer complete, diff=");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³ -> transition to COOLING");
+          fsmSub1.handleEvent(Event::SubStart);
+          g_ahRateSampleCount[0] = 0;
+          g_consecutiveNegativeCount[0] = 0;
+          g_peakDetected[0] = false;
+          g_peakDetectedMs[0] = 0;
+          return;
+        } else if (minDurationMet && !safeAHLevel) {
+          // AH diff dropped too low - might be sensor glitch, wait longer
+          FSM_DBG_PRINT("SUB1: WET safety check - diff dropped to ");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³ (below safety margin), waiting for stabilization...");
           return;
         } else {
-          // Buffer period expired, check minimum WET duration before exiting
-          if (wetElapsed >= WET_MIN_DURATION_MS) {
-            FSM_DBG_PRINTLN("SUB1: WET peak + buffer complete -> transition to COOLING");
-            fsmSub1.handleEvent(Event::SubStart);
-            g_ahRateSampleCount[0] = 0;  // Reset counters
-            g_consecutiveNegativeCount[0] = 0;
-            g_peakDetected[0] = false;
-            g_peakDetectedMs[0] = 0;
-            return;
-          } else {
-            // Minimum duration not yet reached - continue drying
-            uint32_t remainingMs = WET_MIN_DURATION_MS - wetElapsed;
-            FSM_DBG_PRINT("SUB1: WET waiting for minimum duration (");
-            FSM_DBG_PRINT(remainingMs);
-            FSM_DBG_PRINTLN("ms remaining)");
-            return;
-          }
+          // Minimum duration not yet reached
+          FSM_DBG_PRINT("SUB1: WET waiting for minimum duration (");
+          FSM_DBG_PRINT(minDurationRemaining);
+          FSM_DBG_PRINT("ms remaining, diff=");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³)");
+          return;
         }
       }
       
+      // ==================== BEFORE PEAK: MONITOR EVAPORATION RATE ====================
       // Peak detection using moving-average decline
       if (wetElapsed >= AH_ACCEL_WARMUP_MS) {
         // Update rate history buffer
@@ -700,7 +862,9 @@ static void setupStateMachines() {
           float avgChange = recentAvg - previousAvg;
           FSM_DBG_PRINT("SUB1: WET avg recent="); FSM_DBG_PRINT(recentAvg);
           FSM_DBG_PRINT(" prevAvg="); FSM_DBG_PRINT(previousAvg);
-          FSM_DBG_PRINT(" avgChange="); FSM_DBG_PRINTLN(avgChange);
+          FSM_DBG_PRINT(" change="); FSM_DBG_PRINT(avgChange);
+          FSM_DBG_PRINT(" diff="); FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³");
 
           if (avgChange < AH_RATE_DECLINE_THRESHOLD) {
             g_consecutiveNegativeCount[0]++;
@@ -708,11 +872,71 @@ static void setupStateMachines() {
             g_consecutiveNegativeCount[0] = 0;
           }
 
-          if (g_consecutiveNegativeCount[0] >= MIN_CONSECUTIVE_NEGATIVE) {
-            FSM_DBG_PRINTLN("SUB1: WET peak evaporation (avg decline) -> entering post-peak buffer");
+          // Robust peak detection with 4-tier adaptive thresholds
+          uint32_t minPeakTimeMs;
+          float peakRateThreshold;
+          
+          if (g_initialWetDiff[0] < AH_DIFF_BARELY_WET) {
+            // Barely wet: quick peak detection to save power
+            minPeakTimeMs = 60u * 1000u;  // 60s
+            peakRateThreshold = 0.2f;     // Low threshold
+          } else if (g_initialWetDiff[0] < AH_DIFF_MODERATE_WET) {
+            // Moderate: normal thresholds
+            minPeakTimeMs = AH_PEAK_NORMAL_MIN_TIME_MS;           // 120s
+            peakRateThreshold = AH_RATE_NORMAL_PEAK_THRESHOLD;    // 0.35
+          } else if (g_initialWetDiff[0] < AH_DIFF_VERY_WET) {
+            // Very wet: stricter thresholds
+            minPeakTimeMs = 180u * 1000u;    // 180s
+            peakRateThreshold = 0.50f;       // 0.50
+          } else {
+            // Soaked: most stringent thresholds
+            minPeakTimeMs = AH_PEAK_WET_MIN_TIME_MS;        // 240s
+            peakRateThreshold = AH_RATE_WET_PEAK_THRESHOLD; // 0.60
+          }
+
+          bool decliningEnough = (g_consecutiveNegativeCount[0] >= MIN_CONSECUTIVE_NEGATIVE) && (avgChange < -0.05f);
+          bool rateIsLow = (recentAvg < peakRateThreshold);
+          bool hasSpentEnoughTime = (wetElapsed >= minPeakTimeMs);
+          
+          if (decliningEnough && rateIsLow && hasSpentEnoughTime) {
+            FSM_DBG_PRINT("SUB1: WET peak (rate=");
+            FSM_DBG_PRINT(recentAvg, 2);
+            FSM_DBG_PRINT("<");
+            FSM_DBG_PRINT(peakRateThreshold, 2);
+            FSM_DBG_PRINT(", time=");
+            FSM_DBG_PRINT(wetElapsed/1000);
+            FSM_DBG_PRINT("s>=");
+            FSM_DBG_PRINT(minPeakTimeMs/1000);
+            FSM_DBG_PRINT("s) -> ");
+            FSM_DBG_PRINT(g_peakBufferMs[0]/1000);
+            FSM_DBG_PRINTLN("s buffer");
             g_peakDetected[0] = true;
             g_peakDetectedMs[0] = now;
             g_consecutiveNegativeCount[0] = 0;
+            g_lastValidAHDiff[0] = currentAHDiff;
+            
+            // Smart heater off on peak: based on current temperature
+            float peakTemp = g_dhtTemp[1];
+            if (!isnan(peakTemp)) {
+              if (peakTemp >= 39.0f) {
+                // Temp already at/above 39°C: turn heater OFF (already warm enough)
+                if (heaterIsOn(0)) {
+                  FSM_DBG_PRINT("SUB1: Heater OFF at peak (temp ");
+                  FSM_DBG_PRINT(peakTemp, 1);
+                  FSM_DBG_VPRINTLN("°C >= 39°C, already warm)");
+                  heaterRun(0, false);
+                }
+              } else {
+                // Temp below 39°C: keep heater ON to reach 39°C, then turn OFF
+                if (!heaterIsOn(0)) {
+                  FSM_DBG_PRINT("SUB1: Heater ON at peak (temp ");
+                  FSM_DBG_PRINT(peakTemp, 1);
+                  FSM_DBG_VPRINTLN("°C < 39°C, heating to threshold then OFF)");
+                  heaterRun(0, true);
+                }
+                // Note: maybeEarlyHeaterOff() will turn it OFF when it reaches 39°C
+              }
+            }
           }
         }
       }
@@ -723,7 +947,7 @@ static void setupStateMachines() {
   fsmSub2.setRun(SubState::S_WET, []() {
     if (!g_motorStarted[1] && g_subWetStartMs[1] != 0) {
       uint32_t elapsed = (uint32_t)(millis() - g_subWetStartMs[1]);
-      if (elapsed >= HEATER_WARMUP_MS) {
+      if (elapsed >= getAdaptiveWarmupMs(1)) {
         FSM_DBG_PRINTLN("SUB2: WET warmup done -> start motor");
         motorStart(1);
         motorSetDutyPercent(1, 100);
@@ -734,6 +958,9 @@ static void setupStateMachines() {
         g_lastAHRateSampleMs[1] = millis();
         g_prevAHRate[1] = 0.0f;
       }
+    }
+    if (g_subWetStartMs[1] != 0) {
+      maybeEarlyHeaterOff(1, (uint32_t)(millis() - g_subWetStartMs[1]));
     }
     // Sample AH rate every 2 seconds and check for peak (declining rate)
     // But wait AH_ACCEL_WARMUP_MS (30s) after WET start before checking for decline
@@ -748,42 +975,70 @@ static void setupStateMachines() {
       
       g_lastAHRateSampleMs[1] = now;
       float currentRate = g_dhtAHRate[1];  // Use actual AH rate-of-change from motor control
+      float currentAHDiff = g_dhtAHDiff[1];  // Get current AH diff for safety checks
       
       // Validate rate before processing (reject NaN/Inf from sensor glitches)
       if (isnan(currentRate) || isinf(currentRate)) {
         return;  // Skip this sample, wait for next valid rate
       }
       
-      // Check if peak detected and buffer period active
+      // ==================== PEAK-DETECTED: IN POST-PEAK BUFFER PHASE ====================
       if (g_peakDetected[1]) {
         uint32_t bufferElapsed = (uint32_t)(now - g_peakDetectedMs[1]);
-        if (bufferElapsed < WET_PEAK_BUFFER_MS) {
-          // Still in post-peak buffer period - continue drying, don't exit
+        
+        // SAFETY CHECK: Verify AH diff hasn't dropped to unexpected low values (sensor noise/glitch)
+        if (!isnan(currentAHDiff) && currentAHDiff > 0.1f) {
+          g_lastValidAHDiff[1] = currentAHDiff;
+          g_lastAHDiffCheckMs[1] = now;
+        }
+        
+        // Still in post-peak buffer period
+        if (bufferElapsed < g_peakBufferMs[1]) {
+          // Continue monitoring evaporation during buffer
+          uint32_t bufferRemaining = g_peakBufferMs[1] - bufferElapsed;
           FSM_DBG_PRINT("SUB2: WET in post-peak buffer (");
-          FSM_DBG_PRINT(bufferElapsed);
-          FSM_DBG_PRINTLN("ms remaining)");
+          FSM_DBG_PRINT(bufferRemaining);
+          FSM_DBG_PRINT("ms remaining, diff=");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³)");
+          return;
+        }
+        
+        // Buffer period expired - check safety conditions before exiting to COOLING
+        uint32_t minDurationRemaining = (wetElapsed >= g_wetMinDurationMs[1]) ? 0 : (g_wetMinDurationMs[1] - wetElapsed);
+        
+        // SAFETY: Require AH diff to still be reasonable (not accidental low reading)
+        bool safeAHLevel = (currentAHDiff > AH_DIFF_SAFETY_MARGIN) || (g_lastValidAHDiff[1] > AH_DIFF_SAFETY_MARGIN + 0.2f);
+        bool minDurationMet = (minDurationRemaining == 0);
+        
+        if (minDurationMet && safeAHLevel) {
+          FSM_DBG_PRINT("SUB2: WET peak + buffer complete, diff=");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³ -> transition to COOLING");
+          fsmSub2.handleEvent(Event::SubStart);
+          g_ahRateSampleCount[1] = 0;
+          g_consecutiveNegativeCount[1] = 0;
+          g_peakDetected[1] = false;
+          g_peakDetectedMs[1] = 0;
+          return;
+        } else if (minDurationMet && !safeAHLevel) {
+          // AH diff dropped too low - might be sensor glitch, wait longer
+          FSM_DBG_PRINT("SUB2: WET safety check - diff dropped to ");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³ (below safety margin), waiting for stabilization...");
           return;
         } else {
-          // Buffer period expired, check minimum WET duration before exiting
-          if (wetElapsed >= WET_MIN_DURATION_MS) {
-            FSM_DBG_PRINTLN("SUB2: WET peak + buffer complete -> transition to COOLING");
-            fsmSub2.handleEvent(Event::SubStart);
-            g_ahRateSampleCount[1] = 0;  // Reset counters
-            g_consecutiveNegativeCount[1] = 0;
-            g_peakDetected[1] = false;
-            g_peakDetectedMs[1] = 0;
-            return;
-          } else {
-            // Minimum duration not yet reached - continue drying
-            uint32_t remainingMs = WET_MIN_DURATION_MS - wetElapsed;
-            FSM_DBG_PRINT("SUB2: WET waiting for minimum duration (");
-            FSM_DBG_PRINT(remainingMs);
-            FSM_DBG_PRINTLN("ms remaining)");
-            return;
-          }
+          // Minimum duration not yet reached
+          FSM_DBG_PRINT("SUB2: WET waiting for minimum duration (");
+          FSM_DBG_PRINT(minDurationRemaining);
+          FSM_DBG_PRINT("ms remaining, diff=");
+          FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³)");
+          return;
         }
       }
       
+      // ==================== BEFORE PEAK: MONITOR EVAPORATION RATE ====================
       // Peak detection using moving-average decline
       if (wetElapsed >= AH_ACCEL_WARMUP_MS) {
         // Update rate history buffer
@@ -805,7 +1060,9 @@ static void setupStateMachines() {
           float avgChange = recentAvg - previousAvg;
           FSM_DBG_PRINT("SUB2: WET avg recent="); FSM_DBG_PRINT(recentAvg);
           FSM_DBG_PRINT(" prevAvg="); FSM_DBG_PRINT(previousAvg);
-          FSM_DBG_PRINT(" avgChange="); FSM_DBG_PRINTLN(avgChange);
+          FSM_DBG_PRINT(" change="); FSM_DBG_PRINT(avgChange);
+          FSM_DBG_PRINT(" diff="); FSM_DBG_PRINT(currentAHDiff, 2);
+          FSM_DBG_PRINTLN("g/m³");
 
           if (avgChange < AH_RATE_DECLINE_THRESHOLD) {
             g_consecutiveNegativeCount[1]++;
@@ -813,11 +1070,71 @@ static void setupStateMachines() {
             g_consecutiveNegativeCount[1] = 0;
           }
 
-          if (g_consecutiveNegativeCount[1] >= MIN_CONSECUTIVE_NEGATIVE) {
-            FSM_DBG_PRINTLN("SUB2: WET peak evaporation (avg decline) -> entering post-peak buffer");
+          // Robust peak detection with 4-tier adaptive thresholds
+          uint32_t minPeakTimeMs;
+          float peakRateThreshold;
+          
+          if (g_initialWetDiff[1] < AH_DIFF_BARELY_WET) {
+            // Barely wet: quick peak detection to save power
+            minPeakTimeMs = 60u * 1000u;  // 60s
+            peakRateThreshold = 0.2f;     // Low threshold
+          } else if (g_initialWetDiff[1] < AH_DIFF_MODERATE_WET) {
+            // Moderate: normal thresholds
+            minPeakTimeMs = AH_PEAK_NORMAL_MIN_TIME_MS;           // 120s
+            peakRateThreshold = AH_RATE_NORMAL_PEAK_THRESHOLD;    // 0.35
+          } else if (g_initialWetDiff[1] < AH_DIFF_VERY_WET) {
+            // Very wet: stricter thresholds
+            minPeakTimeMs = 180u * 1000u;    // 180s
+            peakRateThreshold = 0.50f;       // 0.50
+          } else {
+            // Soaked: most stringent thresholds
+            minPeakTimeMs = AH_PEAK_WET_MIN_TIME_MS;        // 240s
+            peakRateThreshold = AH_RATE_WET_PEAK_THRESHOLD; // 0.60
+          }
+
+          bool decliningEnough = (g_consecutiveNegativeCount[1] >= MIN_CONSECUTIVE_NEGATIVE) && (avgChange < -0.05f);
+          bool rateIsLow = (recentAvg < peakRateThreshold);
+          bool hasSpentEnoughTime = (wetElapsed >= minPeakTimeMs);
+          
+          if (decliningEnough && rateIsLow && hasSpentEnoughTime) {
+            FSM_DBG_PRINT("SUB2: WET peak (rate=");
+            FSM_DBG_PRINT(recentAvg, 2);
+            FSM_DBG_PRINT("<");
+            FSM_DBG_PRINT(peakRateThreshold, 2);
+            FSM_DBG_PRINT(", time=");
+            FSM_DBG_PRINT(wetElapsed/1000);
+            FSM_DBG_PRINT("s>=");
+            FSM_DBG_PRINT(minPeakTimeMs/1000);
+            FSM_DBG_PRINT("s) -> ");
+            FSM_DBG_PRINT(g_peakBufferMs[1]/1000);
+            FSM_DBG_PRINTLN("s buffer");
             g_peakDetected[1] = true;
             g_peakDetectedMs[1] = now;
             g_consecutiveNegativeCount[1] = 0;
+            g_lastValidAHDiff[1] = currentAHDiff;
+            
+            // Smart heater off on peak: based on current temperature
+            float peakTemp = g_dhtTemp[2];
+            if (!isnan(peakTemp)) {
+              if (peakTemp >= 39.0f) {
+                // Temp already at/above 39°C: turn heater OFF (already warm enough)
+                if (heaterIsOn(1)) {
+                  FSM_DBG_PRINT("SUB2: Heater OFF at peak (temp ");
+                  FSM_DBG_PRINT(peakTemp, 1);
+                  FSM_DBG_VPRINTLN("°C >= 39°C, already warm)");
+                  heaterRun(1, false);
+                }
+              } else {
+                // Temp below 39°C: keep heater ON to reach 39°C, then turn OFF
+                if (!heaterIsOn(1)) {
+                  FSM_DBG_PRINT("SUB2: Heater ON at peak (temp ");
+                  FSM_DBG_PRINT(peakTemp, 1);
+                  FSM_DBG_VPRINTLN("°C < 39°C, heating to threshold then OFF)");
+                  heaterRun(1, true);
+                }
+                // Note: maybeEarlyHeaterOff() will turn it OFF when it reaches 39°C
+              }
+            }
           }
         }
       }
