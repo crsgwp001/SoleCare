@@ -259,9 +259,10 @@ static void motorTask(void * /*pv*/) {
         SubState sub0State = getSub1State();
         SubState sub1State = getSub2State();
         
-        // Log comprehensive data: AH values, diffs, states, rates, PID outputs
+        // Log comprehensive data: AH values, temps, diffs, states, rates, PID outputs
         pidLogData(
           g_dhtAH_ema[0], g_dhtAH_ema[1], g_dhtAH_ema[2],       // AH0, AH1, AH2
+          g_dhtTemp[1], g_dhtTemp[2],                           // Shoe temperatures (sensor1, sensor2)
           g_dhtAHDiff_ema[0], sub0State, ahRates[0], pidOutputs[0] * 100.0,  // Shoe 0
           g_dhtAHDiff_ema[1], sub1State, ahRates[1], pidOutputs[1] * 100.0   // Shoe 1
         );
@@ -385,4 +386,9 @@ bool motorIsOn(uint8_t idx) {
 }
 bool heaterIsOn(uint8_t idx) {
   return (idx < 2) ? g_heaterOn[idx] : false;
+}
+int getMotorDutyCycle(uint8_t idx) {
+  if (idx >= 2) return 0;
+  // Convert PWM value (0-1023) to percentage (0-100)
+  return (int)((g_motorDuty[idx] * 100) / MOTOR_PWM_MAX);
 }

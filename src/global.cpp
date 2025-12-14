@@ -1,24 +1,27 @@
 #include "global.h"
 
 // raw readings
-float g_dhtTemp[3] = {0};
-float g_dhtHum[3] = {0};
+volatile float g_dhtTemp[3] = {0};
+volatile float g_dhtHum[3] = {0};
 
 // instantaneous AH
-float g_dhtAH[3] = {0};
+volatile float g_dhtAH[3] = {0};
 
 // diffs vs. sensor0
-float g_dhtAHDiff[2] = {0};
+volatile float g_dhtAHDiff[2] = {0};
 
 // EMAs (seed to NAN so first sample initializes)
-float g_dhtAH_ema[3] = {NAN, NAN, NAN};
-float g_dhtAHDiff_ema[2] = {NAN, NAN};
+volatile float g_dhtAH_ema[3] = {NAN, NAN, NAN};
+volatile float g_dhtAHDiff_ema[2] = {NAN, NAN};
 
 // boolean status: true == wet
-bool g_dhtIsWet[2] = {false, false};
+volatile bool g_dhtIsWet[2] = {false, false};
 
 // AH rate-of-change in g/m³/min for sensors 1 and 2
 float g_dhtAHRate[2] = {0.0f, 0.0f};
+
+// Cached battery voltage
+volatile float g_lastBatteryVoltage = 0.0f;
 
 // Battery voltage monitoring implementation
 float readBatteryVoltage() {

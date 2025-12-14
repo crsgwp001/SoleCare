@@ -53,7 +53,7 @@ void DisplayUnit::showMessage(const String &msg) {
   unlockDisplay();
 }
 
-void DisplayUnit::showMessage(const String &msg, bool uv0, bool uv1, bool uv0p, bool uv1p) {
+void DisplayUnit::showMessage(const String &msg, bool uv0, bool uv1) {
   lockDisplay();
   // Render text on left, small UV icons on the right
   display.clearDisplay();
@@ -73,19 +73,6 @@ void DisplayUnit::showMessage(const String &msg, bool uv0, bool uv1, bool uv0p, 
   display.drawRect(iconX, yTop, iconW, iconH, SSD1306_WHITE);
   if (uv0)
     display.fillRect(iconX + 2, yTop + 2, iconW - 4, iconH - 4, SSD1306_WHITE);
-  // If paused, draw a small pause glyph (two vertical bars) inside the icon
-  if (uv0p) {
-    int bx = iconX + 4;
-    int by = yTop + 2;
-    int bh = iconH - 4;
-    display.fillRect(bx, by, 2, bh, SSD1306_BLACK);
-    display.fillRect(bx + 4, by, 2, bh, SSD1306_BLACK);
-    // If icon is not filled, draw white pause bars instead
-    if (!uv0) {
-      display.fillRect(bx, by, 2, bh, SSD1306_WHITE);
-      display.fillRect(bx + 4, by, 2, bh, SSD1306_WHITE);
-    }
-  }
   display.setCursor(iconX - 22, yTop + 1);
   display.print("UV0");
   // (no uv-complete rendering in this version)
@@ -93,21 +80,78 @@ void DisplayUnit::showMessage(const String &msg, bool uv0, bool uv1, bool uv0p, 
   display.drawRect(iconX, yBottom, iconW, iconH, SSD1306_WHITE);
   if (uv1)
     display.fillRect(iconX + 2, yBottom + 2, iconW - 4, iconH - 4, SSD1306_WHITE);
-  if (uv1p) {
-    int bx = iconX + 4;
-    int by = yBottom + 2;
-    int bh = iconH - 4;
-    display.fillRect(bx, by, 2, bh, SSD1306_BLACK);
-    display.fillRect(bx + 4, by, 2, bh, SSD1306_BLACK);
-    if (!uv1) {
-      display.fillRect(bx, by, 2, bh, SSD1306_WHITE);
-      display.fillRect(bx + 4, by, 2, bh, SSD1306_WHITE);
-    }
-  }
   display.setCursor(iconX - 22, yBottom + 1);
   display.print("UV1");
   // (no uv-complete rendering in this version)
 
+  display.display();
+  unlockDisplay();
+}
+
+void DisplayUnit::showSplash(const String &text, uint16_t letterDelayMs, uint16_t holdMs, int xPos, bool skipFade) {
+  lockDisplay();
+  
+  // Letter-by-letter reveal animation
+  String revealed = "";
+  int len = text.length();
+  
+  for (int i = 0; i < len; i++) {
+    revealed += text[i];
+    
+    // Clear and redraw with revealed letters
+    display.clearDisplay();
+    display.setTextSize(3);  // Larger size for prominent branding
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(xPos, 22);  // Adjusted for textSize(3) centering
+    display.println(revealed);
+    display.display();
+    
+    // Delay between letters
+    vTaskDelay(pdMS_TO_TICKS(letterDelayMs));
+  }
+  
+  // Hold fully revealed text
+  vTaskDelay(pdMS_TO_TICKS(holdMs));
+  
+  // Only fade if not skipped
+  if (!skipFade) {
+    // Smooth fade-out with 4 blink frames (slower for better transition)
+    for (int blink = 0; blink < 4; blink++) {
+      display.clearDisplay();
+      display.display();
+      vTaskDelay(pdMS_TO_TICKS(200));  // Increased for smoother fade
+      
+      display.clearDisplay();
+      display.setTextSize(3);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(xPos, 22);
+      display.println(text);
+      display.display();
+      vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    
+    // Final clear
+    display.clearDisplay();
+    display.display();
+  }
+  
+  unlockDisplay();
+}
+
+void DisplayUnit::directClear() {
+  lockDisplay();
+  display.clearDisplay();
+  display.display();
+  unlockDisplay();
+}
+
+void DisplayUnit::directShow(const String &text, int xPos) {
+  lockDisplay();
+  display.clearDisplay();
+  display.setTextSize(3);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(xPos, 22);
+  display.println(text);
   display.display();
   unlockDisplay();
 }

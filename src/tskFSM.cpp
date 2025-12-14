@@ -3,6 +3,7 @@
 #include "fsm_debug.h"
 #include "tskMotor.h"
 #include "tskUV.h"
+#include "tskUI.h"
 #include "PIDcontrol.h"
 #include <Arduino.h>
 #include <events.h>
@@ -564,6 +565,9 @@ static void setupStateMachines() {
           fsmSub1.handleEvent(Event::SubStart);
         }
         // else: wait for SUB2 to acquire lock
+
+          // Read and cache battery voltage for UI display
+          g_lastBatteryVoltage = readBatteryVoltage();
       } else {
         // SUB2 not waiting, acquire lock
         g_wetLockOwner = 0;
@@ -1023,10 +1027,11 @@ static void setupStateMachines() {
     // Turn on status LED when checking
     digitalWrite(HW_STATUS_LED_PIN, HIGH);
     digitalWrite(HW_ERROR_LED_PIN, LOW);
+    // Update cached battery voltage
+    g_lastBatteryVoltage = readBatteryVoltage();
     if (!isBatteryOk()) {
-      float vBat = readBatteryVoltage();
       FSM_DBG_PRINT("GLOBAL: Battery voltage low: ");
-      if (Serial) Serial.printf("%.2f V\n", vBat);
+      if (Serial) Serial.printf("%.2f V\n", g_lastBatteryVoltage);
       fsmPostEvent(Event::BatteryLow, false);
     }
   });
@@ -1076,6 +1081,9 @@ static void setupStateMachines() {
     g_wetLockOwner = -1;
     g_uvComplete[0] = g_uvComplete[1] = false;
     g_motorStarted[0] = g_motorStarted[1] = false;
+
+    // Play entry-only SOLE/CARE splash on Idle entry (after reset)
+    triggerSplashEntryOnly();
     
     // Reset substates to IDLE via ResetPressed event
     fsmSub1.handleEvent(Event::ResetPressed);
@@ -1279,4 +1287,20 @@ SubState getSub1State() {
 }
 SubState getSub2State() {
   return fsmSub2.getState();
+}
+
+// Getter functions for timing tracking used in UI progress calculations
+uint32_t getSubWetStartMs(int shoeIdx) {
+  if (shoeIdx < 0 || shoeIdx >= 2) return 0;
+  return g_subWetStartMs[shoeIdx];
+}
+
+uint32_t getSubCoolingStartMs(int shoeIdx) {
+  if (shoeIdx < 0 || shoeIdx >= 2) return 0;
+  return g_subCoolingStartMs[shoeIdx];
+}
+
+uint32_t getCoolingMotorDurationMs(int shoeIdx) {
+  if (shoeIdx < 0 || shoeIdx >= 2) return 0;
+  return g_coolingMotorDurationMs[shoeIdx];
 }

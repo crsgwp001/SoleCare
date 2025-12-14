@@ -11,24 +11,27 @@
 static constexpr float kAmbAhOffset = AMB_AH_OFFSET;
 
 // Raw temperature and humidity readings (indexed by sensor)
-extern float g_dhtTemp[3];
-extern float g_dhtHum[3];
+extern volatile float g_dhtTemp[3];
+extern volatile float g_dhtHum[3];
 
 // Instantaneous absolute humidity (g/m^3)
-extern float g_dhtAH[3];
+extern volatile float g_dhtAH[3];
 
 // Differences relative to sensor 0 (two diffs: sensor1 - sensor0, sensor2 - sensor0)
-extern float g_dhtAHDiff[2];
+extern volatile float g_dhtAHDiff[2];
 
 // EMA-filtered absolute humidity and diffs
-extern float g_dhtAH_ema[3];
-extern float g_dhtAHDiff_ema[2];
+extern volatile float g_dhtAH_ema[3];
+extern volatile float g_dhtAHDiff_ema[2];
 
 // Boolean wet/dry status for sensors 1 and 2 (true = wet)
-extern bool g_dhtIsWet[2];
+extern volatile bool g_dhtIsWet[2];
 
 // AH rate-of-change in g/m³/min for sensors 1 and 2 (calculated by motor task)
 extern float g_dhtAHRate[2];
+
+// Cached battery voltage (updated during Checking state and at boot)
+extern volatile float g_lastBatteryVoltage;
 
 // Battery voltage monitoring
 float readBatteryVoltage();

@@ -24,3 +24,5 @@ bool heaterIsOn(uint8_t idx);
 
 // Query if the motor task is active for index
 bool motorIsActive(uint8_t idx);
+// Query current motor duty cycle percentage (0-100)
+int getMotorDutyCycle(uint8_t idx);

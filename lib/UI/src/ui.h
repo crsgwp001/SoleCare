@@ -8,11 +8,16 @@ public:
   DisplayUnit(uint8_t sda, uint8_t scl, uint8_t wireID);
   bool begin();
   void showMessage(const String &msg);
-  // show message and render UV status icons (uv0, uv1) on the right side
-  // uv0/uv1: whether UV is started; uv0p/uv1p: whether UV is paused
-  void showMessage(const String &msg, bool uv0, bool uv1, bool uv0p, bool uv1p);
-
-private:
+  // Show message and render UV status icons (uv0, uv1) on the right side
+  void showMessage(const String &msg, bool uv0, bool uv1);
+  // Splash animation: letter-by-letter reveal with optional fade
+  // xPos: horizontal cursor position (left=0, right=100+)
+  // skipFade: if true, skip fade-out and leave text on screen
+  void showSplash(const String &text, uint16_t letterDelayMs = 150, uint16_t holdMs = 800, int xPos = 20, bool skipFade = false);
+  
+  // Direct clear and show for synchronized transitions
+  void directClear();
+  void directShow(const String &text, int xPos);
   uint8_t sdaPin;
   uint8_t sclPin;
   uint8_t wireID;

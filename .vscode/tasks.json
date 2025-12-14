@@ -60,6 +60,42 @@
 				"kind": "test",
 				"isDefault": false
 			}
+		},
+		{
+			"label": "PlatformIO: Build (explicit exe)",
+			"type": "shell",
+			"command": "C:\\Users\\Admin\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build (explicit exe)",
+			"type": "shell",
+			"command": "C:\\Users\\Admin\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build (explicit exe)",
+			"type": "shell",
+			"command": "C:\\Users\\Admin\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build (explicit exe)",
+			"type": "shell",
+			"command": "C:\\Users\\Admin\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"group": "build"
 		}
 	]
 }
