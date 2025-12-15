@@ -41,6 +41,26 @@ constexpr uint32_t DRY_STABILIZE_MS = 90u * 1000u;  // Stabilization phase after
 constexpr uint32_t MOTOR_SAFETY_MS = 600u * 1000u;
 constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
 constexpr uint32_t HEATER_WARMUP_MS = 10u * 1000u;
+// COOLING safeguards
+constexpr float COOLING_TEMP_FAN_BOOST_ON = 38.5f;      // If shoe temp >= this, boost fan during COOLING
+constexpr float COOLING_TEMP_RELEASE_C = 37.0f;         // Do not end COOLING motor phase until temp <= this
+constexpr uint32_t COOLING_TEMP_EXTEND_MAX_MS = 120u * 1000u; // Cap extra motor run for temperature hold
+// Ambient-coupled cooling target
+constexpr float COOLING_AMBIENT_DELTA_C = 0.5f;              // Aim to cool to ambient + 0.5C
+constexpr int COOLING_FAN_MIN_DUTY = 70;                     // Minimum fan duty during COOLING
+constexpr int COOLING_FAN_MAX_DUTY = 90;                     // Maximum fan duty during COOLING
+// Re-evap short cycle (Option A)
+constexpr uint32_t RE_EVAP_MAX_MS = 60u * 1000u;             // Max re-evap duration (heater+motor)
+constexpr int RE_EVAP_MOTOR_DUTY = 85;                       // Motor duty during re-evap
+constexpr float RE_EVAP_RISE_BARE_MOD = 0.6f;                // Rise-from-min threshold (barely/moderate)
+constexpr float RE_EVAP_RISE_VERY = 0.8f;                    // Rise threshold (very wet)
+constexpr float RE_EVAP_RISE_SOAKED = 1.0f;                  // Rise threshold (soaked)
+constexpr uint32_t RE_EVAP_MIN_TIME_BARE_MOD = 45u * 1000u;  // Min time before rise valid
+constexpr uint32_t RE_EVAP_MIN_TIME_VERY = 90u * 1000u;
+constexpr uint32_t RE_EVAP_MIN_TIME_SOAKED = 120u * 1000u;
+// WET post-peak buffer safeguards
+constexpr float WET_BUFFER_TEMP_HOT_C = 38.5f;          // If temp >= this at buffer end, extend buffer
+constexpr uint32_t WET_BUFFER_TEMP_EXTEND_MS = 30u * 1000u; // Add 30s buffer when hot
 // Adaptive heater warmup thresholds (override base when shoe already warm)
 constexpr float HEATER_WARMUP_FAST_35C = 35.0f;   // very warm shoe
 constexpr float HEATER_WARMUP_FAST_30C = 30.0f;   // warm shoe

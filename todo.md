@@ -20,7 +20,7 @@
 ### Data & Logging
 - [/] **JSON PID logging** - Structured format (timestamp, setpoint, rate, duty, error)
 - [ ] **State transition logs** - Clean state change records with timing
-- [ ] **Readable debug output** - Cleaner serial format for analysis
+- [/] **Readable debug output** - Cleaner serial format for analysis
 
 ### Testing & Validation
 - [ ] **Single-pass drying tests** - 10+ cycles, target 90%+ success

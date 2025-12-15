@@ -134,38 +134,42 @@ Each shoe (Sub1, Sub2) has independent state flow:
     - Aggressive drying, maximize moisture removal
   - **Phase 2B (Stabilization)**: Target 0.08 g/m³/min, duty 50-100%
     - Switch when rate < 0.25 after 120s in Phase 2A
-    - Gentle final Adaptive Motor-Only Cooling & Stabilization)
+    - Gentle final drying, prevents over-drying
+
+### **S_COOLING** (Motor-Only Finish & Stabilization + Optional Re-Evap)
 - **Two-Phase Design**:
   
-  **Phase 1: Adaptive Motor Cooling (90-210s)**
+  **Phase 1: Adaptive Motor Cooling (90-210s, Ambient-Coupled)**
   - Three-tier strategy based on moisture level:
     - **Nearly dry** (diff ≤ 1.2): 90s @ 80% duty
     - **Moderate** (1.2 < diff ≤ 2.0): 150s @ 90% duty
     - **Very wet** (diff > 2.0): 180s @ 100% duty
+  - **Ambient-coupled motor control**: Modulate duty by temp-to-ambient delta; extend motor phase until shoe reaches ambient + 0.5°C
   - Heater OFF (motor-only drying)
-  - Purpose: Remove remaining surface moisture efficiently
+  - Purpose: Remove remaining moisture, prevent heat-inflated AH readings
   
   **Phase 2: Stabilization (90s)**
   - Motor OFF
   - Let humidity sensor stabilize
   - Sample AH diff every 15s (6 samples total)
+  - Temperature must be ≤ ambient + 0.5°C (safety gate)
   - Purpose: Get accurate final AH reading & track decline trend
   
 - **Entry Actions**:
   - Turn off heater
   - Evaluate current moisture level (g_dhtAHDiff)
-  - Set motor duty (80/90/100%) and duration (90/150/180s)
-  - If retry mode: force 100% duty, max 150s duration
+  - Set motor duty (80/90/100%) and duration (90/150/180s) based on tier
   - Start cooling timer
   - Reset trend tracking buffers
 
 - **Run Callback**:
   - **Motor Phase**: Check motorElapsed < coolingMotorDurationMs
-    - If true: return (still cooling)
-  - **Transition**: If stabilizeStartMs == 0: stop motor, set stabilization start
+    - **Temperature guard**: If shoe temp > ambient + 0.5°C, extend motor until cooler
+    - Else: stop motor, set stabilization start
   - **Stabilization Phase**: Sample AH diff every 15s
     - Store in circular buffer (6 samples)
     - Check stabilizeElapsed < DRY_STABILIZE_MS (90s)
+    - Verify temperature ≤ ambient + 0.5°C (safety gate)
     - If true: return (still stabilizing)
   - **Dry-Check**: After stabilization complete
 
@@ -177,26 +181,29 @@ Each shoe (Sub1, Sub2) has independent state flow:
     - **Lenient** (0.7): Used if moisture consistently declining
   - Evaluate: diff vs selected threshold
   - **If still wet**:
-    - If retry count < 1: retry cooling (forced aggressive settings)
-    - Else: post DryCheckFailed → S_WAITING (re-queue to WET)
+    - Immediately invoke RE-EVAP short cycle (no cooling retries)
   - **If dry**: post SubStart → S_DRY
 
+- **RE-EVAP Short Cycle (Subphase, On First Dry-Check Failure)**:
+  - **Entry**: Still wet after COOLING stabilization
+    - Turn on heater + motor at 80% duty
+    - Set max duration: 30-60s (by moisture tier)
+    - Use lenient rise-from-min detection (threshold 0.15 g/m³/min)
+  - **Run**:
+    - Track AH diff min since re-evap start
+    - If diff rises 0.15+ above min: likely peaked (moisture re-evaporated)
+    - Or if timeout: exit and continue
+  - **Exit**:
+    - Return to COOLING Phase 1 (motor-only, ambient-coupled)
+    - Repeat stabilization → dry-check
+  - **Final Failure**:
+    - If still wet after re-evap: post DryCheckFailed → S_WAITING (re-queue to WET)
+
 - **Transitions**:
   - SubStart (dry detected) → S_DRY
-  - DryCheckFailed (still wet after retry) → S_WAITING
-  - Retry (first failure) → Re-enter S_COOLING with aggressive settings
-  - Stabilization complete: perform dry-check
-
-- **Dry-Check Logic**:
-  - Read g_dhtAHDiff[i]
-  - If diff > AH_DRY_THRESHOLD (0.5f): still wet
-    - Post DryCheckFailed → go to S_WAITING (re-queue)
-  - If diff ≤ AH_DRY_THRESHOLD: dry enough
-    - Post SubStart → go to S_DRY
-
-- **Transitions**:
-  - SubStart (dry detected) → S_DRY
-  - DryCheckFailed (still wet) → S_WAITING
+  - RE-EVAP (first dry-check failure) → Re-Evap subphase (heater+motor brief)
+  - After Re-Evap → back to COOLING Phase 1
+  - DryCheckFailed (after re-evap still wet) → S_WAITING (re-queue to WET)
   - ResetPressed → S_IDLE
 
 ### **S_DRY** (UV Exposure)
@@ -360,10 +367,10 @@ On entry to Idle:
     ├─ Detect: 3 consecutive declining moving averages
     ├─ Wait: 6 min minimum + 75s post-peak buffer
     └─ Peak + buffers satisfied: SubStart event
-  → Sub1: S_COOLING (Motor-Only Finish)
+  → Sub1: S_COOLING (Motor-Only Finish + Stabilization)
     ├─ Evaluate diff: 2.5 → Very Wet tier
-    ├─ 0-180s: motor 100% (aggressive)
-    ├─ 180-270s: stabilize (sample every 15s)
+    ├─ 0-180s: motor 100%, ambient-coupled (extend if temp > ambient+0.5C)
+    ├─ 180-270s: stabilize (sample every 15s, temp guard)
     ├─ Analyze trend: declining (lenient threshold)
     └─ Dry-check: AH_diff = 0.65 < 0.7 (lenient) → PASS
   → Sub1: S_DRY
@@ -375,26 +382,33 @@ On entry to Idle:
 [Idle]
 ```
 
-**Alternative Flow: Retry Before Re-Queue**
+**Alternative Flow: Immediate Re-Evap on First Dry-Check Failure**
 ```
   → Sub1: S_COOLING (first pass)
     └─ Dry-check: AH_diff = 0.9 > 0.7 → FAIL
-  → Sub1: S_COOLING (retry, forced aggressive)
-    ├─ 0-150s: motor 100% (retry boost)
-    ├─ 150-240s: stabilize
-    └─ Dry-check: AH_diff = 0.4 < 0.5 → PASS
+  → Sub1: RE-EVAP short cycle (no cooling retries)
+    ├─ 0-30s: heater + motor 80% (lenient rise detection)
+    ├─ Monitor: diff min tracking, rise detection
+    └─ Peak detected or timeout: exit re-evap
+  → Sub1: S_COOLING (back to Phase 1, ambient-coupled)
+    ├─ 0-180s: motor 100% (aggressive tier)
+    ├─ 180-270s: stabilize
+    └─ Dry-check: AH_diff = 0.45 < 0.5 → PASS
   → Sub1: S_DRY (continue)
 ```
 
-**Worst Case: Re-queue to WET**
+**Worst Case: Re-queue to WET After Re-Evap**
 ```
   → Sub1: S_COOLING (first pass)
     └─ Dry-check: AH_diff = 1.2 → FAIL
-  → Sub1: S_COOLING (retry)
+  → Sub1: RE-EVAP short cycle
+    └─ Still wet after re-evap
+  → Sub1: S_COOLING (Phase 1 retry)
     └─ Dry-check: AH_diff = 1.0 → FAIL (still wet)
   → Sub1: S_WAITING (re-queue as last resort)
   → Sub1: S_WET (additional heating cycle)
-  → Sub1: S_COOLING → S_DRY → S_DONEng]
+  → Sub1: S_COOLING → S_DRY → S_DONE
+```ng]
   → Sub1: Shoe0InitWet (AH_diff > 1.0)
   → Sub1: S_WAITING (queue for lock)
   → Sub1: SubStart (lock acquired)
@@ -459,32 +473,32 @@ Phase 2B: Gentle stabilization
 
 ---
 
-## Status: v1.3.0
-✅ **Production Ready** - Optimized for single-pass drying
-- Dual-phase PID control active and tuned
-- Moving-average peak detection robust
-- Adaptive cooling tiers working efficiently
-- Trend-aware dry-checking reduces retries
-- Retry logic prevents unnecessary WET re-entry
-- All major transitions validated
+## Status: v1.4.2
+✅ **Production Ready** - COOLING streamlined with immediate re-evap
+- **No cooling retries**: On first dry-check failure, immediately invoke re-evap short cycle
+- **Ambient-coupled COOLING**: Motor duty scales by temperature delta; extends phase until shoe cools to ambient+0.5°C
+- **Temperature-gated stabilization**: Safety gate prevents false dry-checks on hot shoes
+- **Re-Evap subphase**: Heater+motor burst with lenient rise detection; returns to COOLING if still wet
+- **Dual-phase peak detection**: Rise-from-min and rate-decline detection in WET phase
+- **Adaptive dry-checks**: Lenient vs strict thresholds based on moisture trending
+- All major transitions validated; ready for field testing
 
-✨ **Key Improvements Over v1.1.0**
-- Longer WET phase (6 min vs 5 min) for better heater utilization
-- Shorter COOLING phase (90-180s vs 60-240s) since heavy lifting done in WET
-- Intelligent dry-check accepts 0.65-0.7 when clearly declining
-- One cooling retry before falling back to WET
-- Full PID control (P+I+D) vs P+I only
+🔧 **Key Improvements Over v1.3.0**
+- Removed cooling retry loop (simpler, faster iteration)
+- Immediate re-evap on first dry-check failure (more responsive to persistent moisture)
+- Ambient-coupled motor control (prevents temperature-inflated AH readings)
+- Temperature safety gate in stabilization (robust dry-checking)
+- Faster cycle times without retry penalty
 
 ⚠️ **Known Considerations**
-- Very soaked shoes (diff > 2.5 entering COOLING) may still need retry
-- Extreme ambient humidity may require threshold adjustments
-- Temperature not yet integrated (future enhancement)
+- Re-evap duration (30-60s) may need tuning per moisture tier
+- Lenient rise threshold (0.15 g/m³/min) can be adjusted if re-evap exits prematurely
+- Very extreme humidity may still require multiple WET cycles
 
-🔧 **Next Steps**
-- Field testing with various shoe types and wetness levels
-- Fine-tune cooling tier thresholds based on real-world data
-- Consider ML integration for predictive drying times
-- Add temperature monitoring for safety/optimization
+🎯 **Next Steps**
+- Upload and monitor real drying sessions; capture logs focusing on COOLING→RE-EVAP→COOLING flow
+- Validate ambient-target temperature control and re-evap effectiveness
+- Fine-tune re-evap durations and rise thresholds based on field data
 
 ### Dual-Phase Setpoint Switching
 ```
