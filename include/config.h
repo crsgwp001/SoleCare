@@ -39,16 +39,16 @@ constexpr uint32_t DRY_COOL_MS_WET = 150u * 1000u;  // Extended COOLING motor du
 constexpr uint32_t DRY_COOL_MS_SOAKED = 180u * 1000u;  // Extended COOLING motor duration (reduced)
 constexpr uint32_t DRY_STABILIZE_MS = 90u * 1000u;  // Stabilization phase after motor stops
 constexpr uint32_t MOTOR_SAFETY_MS = 600u * 1000u;
-constexpr uint32_t HW_UV_DEFAULT_MS = 10u * 1000u;
-constexpr uint32_t HEATER_WARMUP_MS = 10u * 1000u;
-// COOLING safeguards
+constexpr uint32_t HW_UV_DEFAULT_MS = 57u * 1000u;
+constexpr uint32_t HEATER_WARMUP_MS = 12u * 1000u;  // Extended for cold shoes (was 10s)
+constexpr uint32_t HEATER_WARMUP_MOTOR_DUTY = 65u;  // Motor duty during heater-only phase (before PID takes over)
 constexpr float COOLING_TEMP_FAN_BOOST_ON = 38.5f;      // If shoe temp >= this, boost fan during COOLING
 constexpr float COOLING_TEMP_RELEASE_C = 37.0f;         // Do not end COOLING motor phase until temp <= this
 constexpr uint32_t COOLING_TEMP_EXTEND_MAX_MS = 120u * 1000u; // Cap extra motor run for temperature hold
 // Ambient-coupled cooling target
 constexpr float COOLING_AMBIENT_DELTA_C = 0.5f;              // Aim to cool to ambient + 0.5C
-constexpr int COOLING_FAN_MIN_DUTY = 70;                     // Minimum fan duty during COOLING
-constexpr int COOLING_FAN_MAX_DUTY = 90;                     // Maximum fan duty during COOLING
+constexpr int COOLING_FAN_MIN_DUTY = 40;                     // Minimum fan duty during COOLING (low speed for passive cooling, avoid friction heating)
+constexpr int COOLING_FAN_MAX_DUTY = 55;                     // Maximum fan duty during COOLING (cap at 55% to prevent friction heating reheating shoe)
 // Re-evap short cycle (Option A)
 constexpr uint32_t RE_EVAP_MAX_MS = 60u * 1000u;             // Max re-evap duration (heater+motor)
 constexpr int RE_EVAP_MOTOR_DUTY = 85;                       // Motor duty during re-evap
