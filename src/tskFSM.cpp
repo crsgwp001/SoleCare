@@ -163,6 +163,14 @@ static uint32_t g_heaterLastCheckMs[2] = {0, 0};
 static uint8_t g_heaterTrendSamples[2] = {0, 0};  // Count of temp samples to establish trend
 static bool g_heaterTempRising[2] = {false, false};  // true if temp is rising
 
+// Warmup phase (heater + motor): runs until shoe reaches threshold temp, capped by time
+// During this phase, maybeEarlyHeaterOff() is disabled to let heater warm shoe without interference
+constexpr uint32_t HEATER_WARMUP_MIN_MS = 30u * 1000u;  // 30 seconds minimum
+constexpr uint32_t HEATER_WARMUP_EXTENDED_MS = 50u * 1000u;  // 50 seconds for cold shoes
+static uint32_t g_heaterWarmupStartMs[2] = {0, 0};  // 0 = not in warmup phase
+static bool g_heaterWarmupDone[2] = {false, false};  // Track if warmup has been completed for this cycle
+static constexpr float HEATER_WET_TEMP_THRESHOLD_C = 38.0f; // Temp to end unconditional heater-on
+
 static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
   // Smart bang-bang: OFF at 39°C, track trend (rising/falling), only turn ON if falling
   // This prevents churn and lets residual heat help evaporate before reheating
@@ -191,8 +199,8 @@ static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
   }
   
   // ===== HEATER CONTROL =====
-  // OFF threshold: 39°C (single threshold, not hysteresis like before)
-  if (tempC >= 39.0f && heaterIsOn(idx)) {
+  // OFF threshold: 38°C (single threshold). Force OFF unconditionally to avoid state/race issues.
+  if (tempC >= HEATER_WET_TEMP_THRESHOLD_C) {
     FSM_DBG_PRINT("SUB"); FSM_DBG_PRINT(idx);
     FSM_DBG_PRINT(": Heater OFF at ");
     FSM_DBG_PRINT(tempC, 1);
@@ -203,7 +211,7 @@ static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
   
   // ON condition: Turn ON only if temp is falling (not rising/stable)
   // This prevents the heater from chasing upward or oscillating
-  if (!heaterIsOn(idx) && tempC < 39.0f) {
+  if (!heaterIsOn(idx) && tempC < HEATER_WET_TEMP_THRESHOLD_C) {
     // Temperature below 39°C and heater is OFF
     // Only turn ON if we have confidence that temp is FALLING
     bool shouldTurnOn = (g_heaterTrendSamples[idx] >= 2) && !g_heaterTempRising[idx];
@@ -240,6 +248,15 @@ static void startCoolingPhase(int idx, bool isRetry) {
   // Turn heater OFF during COOLING: temperature needs to drop for shoes to cool down
   // (keeping heater ON was causing temperature to hit 43°C and re-evaporate moisture)
   heaterRun(idx, false);
+  
+  // Clear heater warmup and trend state so heater stays OFF during COOLING
+  // This prevents maybeEarlyHeaterOff() from turning heater back ON
+  g_heaterWarmupStartMs[idx] = 0;
+  g_heaterWarmupDone[idx] = false;
+  g_heaterLastTemp[idx] = NAN;  // Reset trend tracking
+  g_heaterLastCheckMs[idx] = 0;
+  g_heaterTrendSamples[idx] = 0;
+  g_heaterTempRising[idx] = false;
 
   const char *label = (idx == 0) ? "SUB1" : "SUB2";
   float coolingDiff = g_dhtAHDiff[idx];
@@ -517,15 +534,22 @@ static void setupStateMachines() {
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: leaving WAITING");
        }},
-      // S_WET: start motor + heater and run for WET_TIMEOUT_MS then transition to COOLING
+      // S_WET: warmup (30-50s), then normal WET with trend-gated heater control
       {SubState::S_WET,
        []() {
          FSM_DBG_PRINTLN("SUB1 ENTRY: WET");
-         // Heater on immediately; motor will start after warmup delay.
+         // Initialize warmup phase
+         g_heaterWarmupStartMs[0] = 0;  // Will be set on first run iteration
+         g_heaterWarmupDone[0] = false;
+         // Reset heater trend tracking (will be re-initialized during warmup)
+         g_heaterLastTemp[0] = NAN;
+         g_heaterLastCheckMs[0] = 0;
+         g_heaterTrendSamples[0] = 0;
+         g_heaterTempRising[0] = false;
+         
          motorStop(0);
          g_motorStarted[0] = false;
          motorSetDutyPercent(0, 0);
-         heaterRun(0, true);
          g_subWetStartMs[0] = millis();
          g_initialWetDiff[0] = g_dhtAHDiff[0];
          assignAdaptiveWETDurations(0, g_initialWetDiff[0]);
@@ -561,6 +585,9 @@ static void setupStateMachines() {
        },
        []() {
          FSM_DBG_PRINTLN("SUB1 EXIT: leaving COOLING"); /* leaving cooling */
+         // Stop motor explicitly when leaving COOLING to ensure fan is off in DRY
+         motorStop(0);
+         g_motorStarted[0] = false;
          g_coolingLocked[0] = false;
        }},
       // S_DRY: on entry stop motor; start single UV (GPIO14) when BOTH shoes reach DRY
@@ -602,10 +629,18 @@ static void setupStateMachines() {
       {SubState::S_WET,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: WET");
+         // Initialize warmup phase
+         g_heaterWarmupStartMs[1] = 0;  // Will be set on first run iteration
+         g_heaterWarmupDone[1] = false;
+         // Reset heater trend tracking (will be re-initialized during warmup)
+         g_heaterLastTemp[1] = NAN;
+         g_heaterLastCheckMs[1] = 0;
+         g_heaterTrendSamples[1] = 0;
+         g_heaterTempRising[1] = false;
+         
          motorStop(1);
          g_motorStarted[1] = false;
          motorSetDutyPercent(1, 0);
-         heaterRun(1, true);
          g_subWetStartMs[1] = millis();
          g_initialWetDiff[1] = g_dhtAHDiff[1];
          assignAdaptiveWETDurations(1, g_initialWetDiff[1]);
@@ -638,7 +673,13 @@ static void setupStateMachines() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: COOLING");
          startCoolingPhase(1, false);
        },
-       []() { FSM_DBG_PRINTLN("SUB2 EXIT: leaving COOLING"); }},
+       []() {
+         FSM_DBG_PRINTLN("SUB2 EXIT: leaving COOLING");
+         // Stop motor explicitly when leaving COOLING to ensure fan is off in DRY
+         motorStop(1);
+         g_motorStarted[1] = false;
+         g_coolingLocked[1] = false;
+       }},
       {SubState::S_DRY,
        []() {
          FSM_DBG_PRINTLN("SUB2 ENTRY: DRY");
@@ -755,32 +796,82 @@ static void setupStateMachines() {
     }
   });
 
-  // S_WET run: start motor after heater warmup; monitor AH rate-of-change to detect peak evaporation
+  // S_WET run: WARMUP PHASE (30-50s), then normal WET with trend-gated heater control
   fsmSub1.setRun(SubState::S_WET, []() {
-    if (!g_motorStarted[0] && g_subWetStartMs[0] != 0) {
-      uint32_t elapsed = (uint32_t)(millis() - g_subWetStartMs[0]);
-      if (elapsed >= getAdaptiveWarmupMs(0)) {
-        FSM_DBG_PRINTLN("SUB1: WET warmup done -> start motor");
+    uint32_t now = millis();
+    uint32_t wetElapsed = (g_subWetStartMs[0] != 0) ? (now - g_subWetStartMs[0]) : 0;
+    
+    // ==================== WARMUP PHASE (30-50s at 60% motor + heater) ====================
+    // During this phase, heater warms shoe WITHOUT trend-gated control interference
+    // Motor runs at fixed 60% to avoid friction heating
+    if (g_heaterWarmupStartMs[0] == 0 && !g_heaterWarmupDone[0]) {
+      // First time entering WET - start warmup
+      g_heaterWarmupStartMs[0] = now;
+      heaterRun(0, true);  // Heater ON
+      // NOTE: Do NOT call motorStart() yet - only set duty directly at 60%
+      // motorStart() initializes PID which immediately overrides our 60% setpoint
+      motorSetDutyPercent(0, 60);  // Manual 60% duty without PID
+      FSM_DBG_PRINTLN("SUB1: Warmup phase START (30-50s at 60% motor + heater)");
+    }
+    
+    // Monitor heater warmup phase progression
+    if (g_heaterWarmupStartMs[0] != 0 && !g_heaterWarmupDone[0]) {
+      uint32_t warmupElapsed = now - g_heaterWarmupStartMs[0];
+      
+      // Determine warmup duration (cold shoe gets extra time)
+      uint32_t targetWarmupMs = HEATER_WARMUP_MIN_MS;  // 30s default
+      float shoeTemp = g_dhtTemp[1];  // Sensor 1 = shoe 0
+      if (!isnan(shoeTemp) && shoeTemp < 25.0f) {
+        targetWarmupMs = HEATER_WARMUP_EXTENDED_MS;  // 50s for cold shoes
+        if (warmupElapsed == 0 || (warmupElapsed >= HEATER_WARMUP_MIN_MS - 1000 && warmupElapsed < HEATER_WARMUP_MIN_MS)) {
+          FSM_DBG_PRINT("SUB1: Cold shoe detected (");
+          FSM_DBG_PRINT(shoeTemp, 1);
+          FSM_DBG_PRINTLN("C) -> extended warmup 50s");
+        }
+      }
+
+      // End warmup immediately once threshold temp is reached
+      if (!isnan(shoeTemp) && shoeTemp >= HEATER_WET_TEMP_THRESHOLD_C) {
+        FSM_DBG_PRINT("SUB1: Warmup threshold reached (");
+        FSM_DBG_PRINT(shoeTemp, 1);
+        FSM_DBG_PRINTLN("C) -> heater OFF, switch to trend-gated control");
+        g_heaterWarmupDone[0] = true;
+        // Turn heater OFF at threshold, then allow trend gating to manage it
+        heaterRun(0, false);
+        // Start motor PID control now
         motorStart(0);
-        motorSetDutyPercent(0, 100);
-        g_motorStarted[0] = true;
-        // Reset AH rate tracking when motor starts
+        // Reset AH rate tracking when starting PID control
         g_ahRateSampleCount[0] = 0;
         g_consecutiveNegativeCount[0] = 0;
-        g_lastAHRateSampleMs[0] = millis();
+        g_lastAHRateSampleMs[0] = now;
+        g_prevAHRate[0] = 0.0f;
+      } else if (warmupElapsed < targetWarmupMs) {
+        // Still in warmup phase - keep heater ON, motor at 60%
+        return;  // Skip the rest of WET logic until warmup is done
+      } else {
+        // Time-based completion fallback
+        FSM_DBG_PRINTLN("SUB1: Warmup time complete -> transition to trend-gated WET (PID motor control)");
+        g_heaterWarmupDone[0] = true;
+        motorStart(0);
+        g_ahRateSampleCount[0] = 0;
+        g_consecutiveNegativeCount[0] = 0;
+        g_lastAHRateSampleMs[0] = now;
         g_prevAHRate[0] = 0.0f;
       }
     }
-    // Heater efficiency: evaluate early cutoff conditions
-    if (g_subWetStartMs[0] != 0) {
-      maybeEarlyHeaterOff(0, (uint32_t)(millis() - g_subWetStartMs[0]));
+    
+    // ==================== NORMAL WET PHASE (after warmup) ====================
+    // Heater is now controlled by trend-gating (maybeEarlyHeaterOff)
+    // Motor duty will be managed by PID control (AH rate monitoring)
+
+    if (g_heaterWarmupDone[0] && g_subWetStartMs[0] != 0) {
+      // Apply trend-based heater control throughout the remainder of WET
+      maybeEarlyHeaterOff(0, wetElapsed);
     }
+
     // Sample AH rate every 2 seconds and check for peak (declining rate)
     // But wait AH_ACCEL_WARMUP_MS (30s) after WET start before checking for decline
-    if (g_motorStarted[0] && g_subWetStartMs[0] != 0) {
-      uint32_t now = millis();
-      uint32_t wetElapsed = (uint32_t)(now - g_subWetStartMs[0]);
-      
+    if (g_heaterWarmupDone[0] && g_subWetStartMs[0] != 0) {
       // Early return if sampling interval hasn't elapsed (prevent tight loop)
       if ((uint32_t)(now - g_lastAHRateSampleMs[0]) < 2000) {
         return;
@@ -1012,15 +1103,8 @@ static void setupStateMachines() {
             g_peakDetectedMs[0] = now;
             g_consecutiveNegativeCount[0] = 0;
             g_lastValidAHDiff[0] = currentAHDiff;
-            
-            // Turn heater OFF immediately on peak: prevents re-heating during post-peak buffer
-            // (heating causes AH to rise again, defeating the purpose of post-peak wait)
-            if (heaterIsOn(0)) {
-              FSM_DBG_PRINT("SUB1: Heater OFF at peak (temp=");
-              FSM_DBG_PRINT(g_dhtTemp[1], 1);
-              FSM_DBG_PRINTLN("C) - no heating during buffer");
-              heaterRun(0, false);
-            }
+            // Heater continues during peak detection for extra heating time
+            FSM_DBG_PRINTLN("SUB1: WET peak detected, entering post-peak buffer (heater continues)");
           }
         }
       }
@@ -1029,29 +1113,77 @@ static void setupStateMachines() {
     }
   });
   fsmSub2.setRun(SubState::S_WET, []() {
-    if (!g_motorStarted[1] && g_subWetStartMs[1] != 0) {
-      uint32_t elapsed = (uint32_t)(millis() - g_subWetStartMs[1]);
-      if (elapsed >= getAdaptiveWarmupMs(1)) {
-        FSM_DBG_PRINTLN("SUB2: WET warmup done -> start motor");
+    uint32_t now = millis();
+    uint32_t wetElapsed = (g_subWetStartMs[1] != 0) ? (now - g_subWetStartMs[1]) : 0;
+    
+    // ==================== WARMUP PHASE (30-50s at 60% motor + heater) ====================
+    // During this phase, heater warms shoe WITHOUT trend-gated control interference
+    // Motor runs at fixed 60% to avoid friction heating
+    if (g_heaterWarmupStartMs[1] == 0 && !g_heaterWarmupDone[1]) {
+      // First time entering WET - start warmup
+      g_heaterWarmupStartMs[1] = now;
+      heaterRun(1, true);  // Heater ON
+      // NOTE: Do NOT call motorStart() yet - only set duty directly at 60%
+      // motorStart() initializes PID which immediately overrides our 60% setpoint
+      motorSetDutyPercent(1, 60);  // Manual 60% duty without PID
+      FSM_DBG_PRINTLN("SUB2: Warmup phase START (30-50s at 60% motor + heater)");
+    }
+    
+    // Monitor heater warmup phase progression
+    if (g_heaterWarmupStartMs[1] != 0 && !g_heaterWarmupDone[1]) {
+      uint32_t warmupElapsed = now - g_heaterWarmupStartMs[1];
+      
+      // Determine warmup duration (cold shoe gets extra time)
+      uint32_t targetWarmupMs = HEATER_WARMUP_MIN_MS;  // 30s default
+      float shoeTemp = g_dhtTemp[2];  // Sensor 2 = shoe 1
+      if (!isnan(shoeTemp) && shoeTemp < 25.0f) {
+        targetWarmupMs = HEATER_WARMUP_EXTENDED_MS;  // 50s for cold shoes
+        if (warmupElapsed == 0 || (warmupElapsed >= HEATER_WARMUP_MIN_MS - 1000 && warmupElapsed < HEATER_WARMUP_MIN_MS)) {
+          FSM_DBG_PRINT("SUB2: Cold shoe detected (");
+          FSM_DBG_PRINT(shoeTemp, 1);
+          FSM_DBG_PRINTLN("C) -> extended warmup 50s");
+        }
+      }
+
+      // End warmup immediately once threshold temp is reached
+      if (!isnan(shoeTemp) && shoeTemp >= HEATER_WET_TEMP_THRESHOLD_C) {
+        FSM_DBG_PRINT("SUB2: Warmup threshold reached (");
+        FSM_DBG_PRINT(shoeTemp, 1);
+        FSM_DBG_PRINTLN("C) -> heater OFF, switch to trend-gated control");
+        g_heaterWarmupDone[1] = true;
+        heaterRun(1, false);
         motorStart(1);
-        motorSetDutyPercent(1, 100);
-        g_motorStarted[1] = true;
-        // Reset AH rate tracking when motor starts
         g_ahRateSampleCount[1] = 0;
         g_consecutiveNegativeCount[1] = 0;
-        g_lastAHRateSampleMs[1] = millis();
+        g_lastAHRateSampleMs[1] = now;
+        g_prevAHRate[1] = 0.0f;
+      } else if (warmupElapsed < targetWarmupMs) {
+        // Still in warmup phase - keep heater ON, motor at 60%
+        return;  // Skip the rest of WET logic until warmup is done
+      } else {
+        // Time-based completion fallback
+        FSM_DBG_PRINTLN("SUB2: Warmup time complete -> transition to trend-gated WET (PID motor control)");
+        g_heaterWarmupDone[1] = true;
+        motorStart(1);
+        g_ahRateSampleCount[1] = 0;
+        g_consecutiveNegativeCount[1] = 0;
+        g_lastAHRateSampleMs[1] = now;
         g_prevAHRate[1] = 0.0f;
       }
     }
-    if (g_subWetStartMs[1] != 0) {
-      maybeEarlyHeaterOff(1, (uint32_t)(millis() - g_subWetStartMs[1]));
+    
+    // ==================== NORMAL WET PHASE (after warmup) ====================
+    // Heater is now controlled by trend-gating (maybeEarlyHeaterOff)
+    // Motor duty will be managed by PID control (AH rate monitoring)
+    
+    if (g_heaterWarmupDone[1] && g_subWetStartMs[1] != 0) {
+      // Apply trend-based heater control throughout the remainder of WET
+      maybeEarlyHeaterOff(1, wetElapsed);
     }
+
     // Sample AH rate every 2 seconds and check for peak (declining rate)
     // But wait AH_ACCEL_WARMUP_MS (30s) after WET start before checking for decline
-    if (g_motorStarted[1] && g_subWetStartMs[1] != 0) {
-      uint32_t now = millis();
-      uint32_t wetElapsed = (uint32_t)(now - g_subWetStartMs[1]);
-      
+    if (g_heaterWarmupDone[1] && g_subWetStartMs[1] != 0) {
       // Early return if sampling interval hasn't elapsed (prevent tight loop)
       if ((uint32_t)(now - g_lastAHRateSampleMs[1]) < 2000) {
         return;
@@ -1280,15 +1412,8 @@ static void setupStateMachines() {
             g_peakDetectedMs[1] = now;
             g_consecutiveNegativeCount[1] = 0;
             g_lastValidAHDiff[1] = currentAHDiff;
-            
-            // Turn heater OFF immediately on peak: prevents re-heating during post-peak buffer
-            // (heating causes AH to rise again, defeating the purpose of post-peak wait)
-            if (heaterIsOn(1)) {
-              FSM_DBG_PRINT("SUB2: Heater OFF at peak (temp=");
-              FSM_DBG_PRINT(g_dhtTemp[2], 1);
-              FSM_DBG_PRINTLN("C) - no heating during buffer");
-              heaterRun(1, false);
-            }
+            // Heater continues during peak detection for extra heating time
+            FSM_DBG_PRINTLN("SUB2: WET peak detected, entering post-peak buffer (heater continues)");
           }
         }
       }
@@ -1308,8 +1433,13 @@ static void setupStateMachines() {
 
     // ================= RE-EVAP SHORT CYCLE =================
     if (g_inReEvap[0]) {
-      // Heater ON, motor at fixed duty; looking for lenient rise-from-min or timeout
-      heaterRun(0, true);
+      // Heater ON (below cutoff), motor at fixed duty; looking for lenient rise-from-min or timeout
+      float t = g_dhtTemp[1];
+      if (!isnan(t) && t >= HEATER_WET_TEMP_THRESHOLD_C) {
+        heaterRun(0, false);
+      } else {
+        heaterRun(0, true);
+      }
       if (!g_motorStarted[0]) { motorStart(0); g_motorStarted[0] = true; }
       motorSetDutyPercent(0, RE_EVAP_MOTOR_DUTY);
       uint32_t now = millis();
@@ -1360,22 +1490,38 @@ static void setupStateMachines() {
     float ambC0 = g_dhtTemp[0];
     float targetC0 = (!isnan(ambC0) ? (ambC0 + COOLING_AMBIENT_DELTA_C) : COOLING_TEMP_RELEASE_C);
     
-    // Phase 1: motor running (adaptive duration based on wetness)
-    // Boost fan if temperature is high to shed heat faster
+    // Phase 1: motor running with duty based on temperature delta (shoe vs ambient)
+    // Goal: Use motor to cool when shoe is HOT; OFF when ambient is warmer (passive cooling/heating sufficient)
+    // Heater is already OFF; motor circulation is the ONLY cooling mechanism
     if (!isnan(tempC0) && !isnan(ambC0)) {
-      float over = tempC0 - ambC0;
-      int duty = COOLING_FAN_MIN_DUTY;
-      if (over > 1.5f) duty = COOLING_FAN_MAX_DUTY; // much hotter than ambient
-      else if (over > 0.8f) duty = 80;
+      float delta = tempC0 - ambC0;  // Positive = shoe hotter, negative = ambient hotter
+      int duty = 0;  // Default: motor OFF
+      
+      if (delta > 5.0f) {
+        // Shoe much hotter than ambient: aggressive motor cooling needed
+        duty = 90;  // Increased to speed cooling
+      } else if (delta > 2.0f) {
+        // Shoe moderately hotter: medium-high motor speed
+        duty = 75;  // Increased from 60
+      } else if (delta > 0.5f) {
+        // Shoe slightly hotter: ensure meaningful airflow
+        duty = 55;  // Increased from 40
+      }
+      // If delta <= 0.5: ambient is at least as warm as shoe, motor OFF (duty = 0)
+      
       motorSetDutyPercent(0, duty);
     } else if (!isnan(tempC0) && tempC0 >= COOLING_TEMP_FAN_BOOST_ON) {
-      motorSetDutyPercent(0, COOLING_FAN_MAX_DUTY);
+      // Fallback: high shoe temp detected, use moderate cooling (60%)
+      motorSetDutyPercent(0, 60);
+    } else {
+      // Safety: if can't determine temperature reliably, use low motor (40%)
+      motorSetDutyPercent(0, 40);
     }
     if (motorElapsed < g_coolingMotorDurationMs[0]) {
       return; // Still in motor-run phase
     }
     
-    // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded)
+    // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded to prevent watchdog timeout)
     if (!isnan(tempC0) && tempC0 > targetC0) {
       if (motorElapsed < g_coolingMotorDurationMs[0] + COOLING_TEMP_EXTEND_MAX_MS) {
         static uint32_t lastHoldLog0 = 0;
@@ -1387,11 +1533,21 @@ static void setupStateMachines() {
           FSM_DBG_PRINT(targetC0, 1);
           FSM_DBG_PRINTLN("C, extending motor run");
         }
-        // Ensure fan boost while hot
-        motorSetDutyPercent(0, 90);
+        // Adjust motor duty based on current temp delta during extension
+        float delta = tempC0 - ambC0;
+        if (delta > 5.0f) {
+          motorSetDutyPercent(0, 80);  // Still hot, use high duty
+        } else if (delta > 2.0f) {
+          motorSetDutyPercent(0, 60);  // Moderately hot
+        } else {
+          motorSetDutyPercent(0, 40);  // Just barely above target
+        }
         return;
       }
-      // Else: max extension reached, proceed to stabilization anyway
+      // Max extension reached: force stabilization to prevent infinite watchdog timeout
+      FSM_DBG_PRINT("SUB1: COOLING -> max motor extension (");
+      FSM_DBG_PRINT(motorElapsed);
+      FSM_DBG_PRINTLN("ms) reached, forcing stabilization to prevent watchdog");
     }
     
     // Transition from motor phase to stabilization phase
@@ -1468,7 +1624,12 @@ static void setupStateMachines() {
 
     // ================= RE-EVAP SHORT CYCLE =================
     if (g_inReEvap[1]) {
-      heaterRun(1, true);
+      float t = g_dhtTemp[2];
+      if (!isnan(t) && t >= HEATER_WET_TEMP_THRESHOLD_C) {
+        heaterRun(1, false);
+      } else {
+        heaterRun(1, true);
+      }
       if (!g_motorStarted[1]) { motorStart(1); g_motorStarted[1] = true; }
       motorSetDutyPercent(1, RE_EVAP_MOTOR_DUTY);
       uint32_t now = millis();
@@ -1517,22 +1678,38 @@ static void setupStateMachines() {
     float ambC1 = g_dhtTemp[0];
     float targetC1 = (!isnan(ambC1) ? (ambC1 + COOLING_AMBIENT_DELTA_C) : COOLING_TEMP_RELEASE_C);
     
-    // Phase 1: motor running (adaptive duration based on wetness)
-    // Boost fan if temperature is high to shed heat faster
+    // Phase 1: motor running with duty based on temperature delta (shoe vs ambient)
+    // Goal: Use motor to cool when shoe is HOT; OFF when ambient is warmer (passive cooling/heating sufficient)
+    // Heater is already OFF; motor circulation is the ONLY cooling mechanism
     if (!isnan(tempC1) && !isnan(ambC1)) {
-      float over = tempC1 - ambC1;
-      int duty = COOLING_FAN_MIN_DUTY;
-      if (over > 1.5f) duty = COOLING_FAN_MAX_DUTY;
-      else if (over > 0.8f) duty = 80;
+      float delta = tempC1 - ambC1;  // Positive = shoe hotter, negative = ambient hotter
+      int duty = 0;  // Default: motor OFF
+      
+      if (delta > 5.0f) {
+        // Shoe much hotter than ambient: aggressive motor cooling needed
+        duty = 90;  // Increased to speed cooling
+      } else if (delta > 2.0f) {
+        // Shoe moderately hotter: medium-high motor speed
+        duty = 75;  // Increased from 60
+      } else if (delta > 0.5f) {
+        // Shoe slightly hotter: ensure meaningful airflow
+        duty = 55;  // Increased from 40
+      }
+      // If delta <= 0.5: ambient is at least as warm as shoe, motor OFF (duty = 0)
+      
       motorSetDutyPercent(1, duty);
     } else if (!isnan(tempC1) && tempC1 >= COOLING_TEMP_FAN_BOOST_ON) {
-      motorSetDutyPercent(1, COOLING_FAN_MAX_DUTY);
+      // Fallback: high shoe temp detected, use moderate cooling (60%)
+      motorSetDutyPercent(1, 60);
+    } else {
+      // Safety: if can't determine temperature reliably, use low motor (40%)
+      motorSetDutyPercent(1, 40);
     }
     if (motorElapsed < g_coolingMotorDurationMs[1]) {
       return; // Still in motor-run phase
     }
     
-    // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded)
+    // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded to prevent watchdog timeout)
     if (!isnan(tempC1) && tempC1 > targetC1) {
       if (motorElapsed < g_coolingMotorDurationMs[1] + COOLING_TEMP_EXTEND_MAX_MS) {
         static uint32_t lastHoldLog1 = 0;
@@ -1544,11 +1721,21 @@ static void setupStateMachines() {
           FSM_DBG_PRINT(targetC1, 1);
           FSM_DBG_PRINTLN("C, extending motor run");
         }
-        // Ensure fan boost while hot
-        motorSetDutyPercent(1, 90);
+        // Adjust motor duty based on current temp delta during extension
+        float delta = tempC1 - ambC1;
+        if (delta > 5.0f) {
+          motorSetDutyPercent(1, 80);  // Still hot, use high duty
+        } else if (delta > 2.0f) {
+          motorSetDutyPercent(1, 60);  // Moderately hot
+        } else {
+          motorSetDutyPercent(1, 40);  // Just barely above target
+        }
         return;
       }
-      // Else: max extension reached, proceed to stabilization anyway
+      // Max extension reached: force stabilization to prevent infinite watchdog timeout
+      FSM_DBG_PRINT("SUB2: COOLING -> max motor extension (");
+      FSM_DBG_PRINT(motorElapsed);
+      FSM_DBG_PRINTLN("ms) reached, forcing stabilization to prevent watchdog");
     }
     
     // Transition from motor phase to stabilization phase

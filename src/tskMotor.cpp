@@ -309,6 +309,30 @@ static void motorTask(void * /*pv*/) {
       }
     }
 
+    // ==================== SAFETY ACTUATOR GUARD ====================
+    // Ensure actuators are OFF in DRY or when Global is Done, regardless of queued commands
+    {
+      GlobalState gs = getGlobalState();
+      SubState s0 = getSub1State();
+      SubState s1 = getSub2State();
+      bool forceOff0 = (gs == GlobalState::Done) || (s0 == SubState::S_DRY);
+      bool forceOff1 = (gs == GlobalState::Done) || (s1 == SubState::S_DRY);
+      if (forceOff0) {
+        g_motorOn[0] = false;
+        g_heaterOn[0] = false;
+        g_motorTargetDuty[0] = 0;
+        setMotorPWM(0, 0);
+        setHeaterRelay(0, false);
+      }
+      if (forceOff1) {
+        g_motorOn[1] = false;
+        g_heaterOn[1] = false;
+        g_motorTargetDuty[1] = 0;
+        setMotorPWM(1, 0);
+        setHeaterRelay(1, false);
+      }
+    }
+
     // Check sensor conditions and timeouts
     for (int i = 0; i < 2; ++i) {
       if (!g_motorActive[i])
