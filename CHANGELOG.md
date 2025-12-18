@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## v2.1.0 - (2025-12-18)
+
+Fallback release: DHT sensor timing stabilization on ESP32
+
+- Sensor: Switch to direct Adafruit DHT usage (`DHT22`) with back-to-back T/H reads.
+- Timing protection: Wrap each DHT read in a short critical section to prevent ISR jitter during bit-bang.
+- Task scheduling: Pin sensor task to core 0 with slightly higher priority to reduce timing interference.
+- Interval: Read cycle every 3 seconds (matches proven working sketch cadence).
+- Logging: Clear per-sensor diagnostics (GPIO, T/H) to verify raw results.
+
+Files changed
+- `src/tskDHT.cpp`: Direct DHT, critical sections, core pinning, simplified cycle.
+
+Notes
+- Root cause was likely ISR/jitter on the more loaded core disrupting DHT timing; critical section + core0 pinning keeps reads stable.
+- No functional changes to FSM, motor, or UV in this patch.
+
 ## v1.4.1 - (2025-12-14)
 
 ### Motor Control & Power Optimization
