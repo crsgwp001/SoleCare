@@ -6,7 +6,7 @@ constexpr float AH_WET_THRESHOLD = 1.0f;   // Shoe is wet when AH diff > this va
 constexpr float AH_DRY_THRESHOLD = 0.7f;   // Shoe is dry when AH diff < this value (exit COOLING to DRY, hysteresis from WET)
 constexpr float AH_DRY_THRESHOLD_LENIENT = 1.0f;  // Lenient threshold when AH diff is consistently declining
 constexpr float EMA_ALPHA = 0.2f;
-constexpr float AMB_AH_OFFSET = 0.0f;
+constexpr float AMB_AH_OFFSET = 0.7f;
 
 // EMI Protection: Maximum allowed AH change per sample (g/m³)
 // Normal changes are < 0.5 g/m³/sample; anything larger is likely EMI noise

@@ -56,6 +56,10 @@ static void vSensorTask(void * /*pvParameters*/) {
     for (int i = 0; i < 3; ++i) {
       if (!isnan(g_dhtTemp[i]) && !isnan(g_dhtHum[i])) {
         float ah = computeAH(g_dhtTemp[i], g_dhtHum[i]);
+        // Apply offset to ambient sensor (sensor 0)
+        if (i == 0) {
+          ah += AMB_AH_OFFSET;
+        }
         g_dhtAH[i] = ah;
         g_dhtAH_ema[i] = ah;
       } else {
