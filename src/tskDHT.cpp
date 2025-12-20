@@ -4,6 +4,7 @@
 #include "dev_debug.h"
 #include <Sensor.h>          // for computeAH
 #include <DHT.h>
+#include "tskMotor.h"  // for optional EMI-aware adjustments and duty checks
 #include <Adafruit_Sensor.h>
 #include <cstring>
 
@@ -18,14 +19,15 @@ static DHT dht2(HW_DHT_PIN_2, DHT22);
 // yields between sensor reads and retry once on failure.
 
 static inline void readDHTSafe(DHT &d, float &t, float &h) {
-  t = d.readTemperature();
-  h = d.readHumidity();
-  if (isnan(t) || isnan(h)) {
-    vTaskDelay(pdMS_TO_TICKS(20));
-    float t2 = d.readTemperature();
-    float h2 = d.readHumidity();
-    if (!isnan(t2)) t = t2;
-    if (!isnan(h2)) h = h2;
+  // Attempt up to 3 reads with short delays; DHT22 can glitch near PWM edges
+  t = NAN; h = NAN;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    float tr = d.readTemperature();
+    float hr = d.readHumidity();
+    if (!isnan(tr) && !isnan(hr)) {
+      t = tr; h = hr; break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(15));
   }
 }
 
@@ -35,14 +37,20 @@ static void vSensorTask(void * /*pvParameters*/) {
   dht2.begin();
   // DHT22 needs at least 2s after power-up before first read
   vTaskDelay(pdMS_TO_TICKS(2000));
+  // Track if we've ever had a valid sample per sensor (to avoid using 0.0 on cold start)
+  static bool s_hasValid[3] = {false, false, false};
+
   while (true) {
     // Sensor 0 (ambient)
     float t0, h0;
     readDHTSafe(dht0, t0, h0);
 
     DEV_DBG_PRINT("DHT0 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_0); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t0); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h0);
-    g_dhtTemp[0] = t0;
-    g_dhtHum[0] = h0;
+    if (!isnan(t0) && !isnan(h0)) {
+      g_dhtTemp[0] = t0;
+      g_dhtHum[0] = h0;
+      s_hasValid[0] = true;
+    }
     // Yield briefly to feed WDT/IDLE
     vTaskDelay(pdMS_TO_TICKS(1));
 
@@ -51,8 +59,11 @@ static void vSensorTask(void * /*pvParameters*/) {
     readDHTSafe(dht1, t1, h1);
 
     DEV_DBG_PRINT("DHT1 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_1); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t1); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h1);
-    g_dhtTemp[1] = t1;
-    g_dhtHum[1] = h1;
+    if (!isnan(t1) && !isnan(h1)) {
+      g_dhtTemp[1] = t1;
+      g_dhtHum[1] = h1;
+      s_hasValid[1] = true;
+    }
     vTaskDelay(pdMS_TO_TICKS(1));
 
     // Sensor 2
@@ -60,18 +71,19 @@ static void vSensorTask(void * /*pvParameters*/) {
     readDHTSafe(dht2, t2, h2);
 
     DEV_DBG_PRINT("DHT2 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_2); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t2); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h2);
-    g_dhtTemp[2] = t2;
-    g_dhtHum[2] = h2;
+    if (!isnan(t2) && !isnan(h2)) {
+      g_dhtTemp[2] = t2;
+      g_dhtHum[2] = h2;
+      s_hasValid[2] = true;
+    }
 
     // Compute AH and simple wet flags (no EMA/no filtering)
     for (int i = 0; i < 3; ++i) {
-      if (!isnan(g_dhtTemp[i]) && !isnan(g_dhtHum[i])) {
+      if (s_hasValid[i]) {
         float ah = computeAH(g_dhtTemp[i], g_dhtHum[i]);
-        // Apply offset to ambient sensor (sensor 0)
         if (i == 0) {
           ah += AMB_AH_OFFSET;
         }
-        // Clamp unrealistic per-sample jumps to protect against EMI/glitches
         float prev = g_dhtAH[i];
         if (!isnan(prev) && prev != 0.0f) {
           float delta = ah - prev;
@@ -81,6 +93,7 @@ static void vSensorTask(void * /*pvParameters*/) {
         g_dhtAH[i] = ah;
         g_dhtAH_ema[i] = ah;
       } else {
+        // No valid sample ever seen for this sensor yet; hold as NAN
         g_dhtAH[i] = NAN;
         g_dhtAH_ema[i] = NAN;
       }
@@ -93,12 +106,8 @@ static void vSensorTask(void * /*pvParameters*/) {
         g_dhtAHDiff_ema[i - 1] = diff;
         g_dhtIsWet[i - 1] = (diff > AH_WET_THRESHOLD);
       } else {
-        // Invalid reading from ambient or shoe sensor; do not force DRY.
-        // Preserve last valid wet/dry state and mark diffs as NAN so
-        // downstream checks ignore this cycle.
-        g_dhtAHDiff[i - 1] = NAN;
-        g_dhtAHDiff_ema[i - 1] = NAN;
-        // Intentionally leave g_dhtIsWet[i - 1] unchanged
+        // Preserve last diff and wet state when either AH is invalid (hold-last)
+        // Intentionally no updates here
       }
     }
 

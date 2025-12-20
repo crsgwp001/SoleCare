@@ -200,11 +200,20 @@ static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
   
   // ===== HEATER CONTROL =====
   // OFF threshold: 38°C (single threshold). Force OFF unconditionally to avoid state/race issues.
+  // Throttle log spam to once every 5s or on state change
+  static uint32_t s_lastHeaterLogMs[2] = {0, 0};
+  static bool s_lastHeaterStateOn[2] = {false, false};
   if (tempC >= HEATER_WET_TEMP_THRESHOLD_C) {
-    FSM_DBG_PRINT("SUB"); FSM_DBG_PRINT(idx);
-    FSM_DBG_PRINT(": Heater OFF at ");
-    FSM_DBG_PRINT(tempC, 1);
-    FSM_DBG_PRINTLN("C (threshold reached, let residual heat evaporate)");
+    uint32_t nowMs = millis();
+    bool shouldLog = (!s_lastHeaterStateOn[idx]) || (nowMs - s_lastHeaterLogMs[idx] >= 5000);
+    if (shouldLog) {
+      FSM_DBG_PRINT("SUB"); FSM_DBG_PRINT(idx);
+      FSM_DBG_PRINT(": Heater OFF at ");
+      FSM_DBG_PRINT(tempC, 1);
+      FSM_DBG_PRINTLN("C (threshold reached)");
+      s_lastHeaterLogMs[idx] = nowMs;
+      s_lastHeaterStateOn[idx] = false;
+    }
     heaterRun(idx, false);
     return;
   }
@@ -217,10 +226,16 @@ static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
     bool shouldTurnOn = (g_heaterTrendSamples[idx] >= 2) && !g_heaterTempRising[idx];
     
     if (shouldTurnOn) {
-      FSM_DBG_PRINT("SUB"); FSM_DBG_PRINT(idx);
-      FSM_DBG_PRINT(": Heater ON: temp ");
-      FSM_DBG_PRINT(tempC, 1);
-      FSM_DBG_PRINTLN("C falling, resuming until 39C");
+      uint32_t nowMs = millis();
+      bool shouldLog = (s_lastHeaterStateOn[idx] == false) || (nowMs - s_lastHeaterLogMs[idx] >= 5000);
+      if (shouldLog) {
+        FSM_DBG_PRINT("SUB"); FSM_DBG_PRINT(idx);
+        FSM_DBG_PRINT(": Heater ON: temp ");
+        FSM_DBG_PRINT(tempC, 1);
+        FSM_DBG_PRINTLN("C falling, resuming until 39C");
+        s_lastHeaterLogMs[idx] = nowMs;
+        s_lastHeaterStateOn[idx] = true;
+      }
       heaterRun(idx, true);
       return;
     }
