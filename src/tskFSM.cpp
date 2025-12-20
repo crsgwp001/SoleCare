@@ -199,22 +199,26 @@ static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
   }
   
   // ===== HEATER CONTROL =====
-  // OFF threshold: 38°C (single threshold). Force OFF unconditionally to avoid state/race issues.
-  // Throttle log spam to once every 5s or on state change
+  // OFF threshold: 38°C (single threshold). Force OFF, but only log and command on state change.
+  // Throttle log spam to once every 5s or on state change.
   static uint32_t s_lastHeaterLogMs[2] = {0, 0};
   static bool s_lastHeaterStateOn[2] = {false, false};
+  bool hwHeaterOn = heaterIsOn(idx);
+
   if (tempC >= HEATER_WET_TEMP_THRESHOLD_C) {
-    uint32_t nowMs = millis();
-    bool shouldLog = (!s_lastHeaterStateOn[idx]) || (nowMs - s_lastHeaterLogMs[idx] >= 5000);
-    if (shouldLog) {
-      FSM_DBG_PRINT("SUB"); FSM_DBG_PRINT(idx);
-      FSM_DBG_PRINT(": Heater OFF at ");
-      FSM_DBG_PRINT(tempC, 1);
-      FSM_DBG_PRINTLN("C (threshold reached)");
-      s_lastHeaterLogMs[idx] = nowMs;
-      s_lastHeaterStateOn[idx] = false;
+    if (hwHeaterOn) {
+      uint32_t nowMs = millis();
+      bool shouldLog = (!s_lastHeaterStateOn[idx]) || (nowMs - s_lastHeaterLogMs[idx] >= 5000);
+      if (shouldLog) {
+        FSM_DBG_PRINT("SUB"); FSM_DBG_PRINT(idx);
+        FSM_DBG_PRINT(": Heater OFF at ");
+        FSM_DBG_PRINT(tempC, 1);
+        FSM_DBG_PRINTLN("C (threshold reached)");
+        s_lastHeaterLogMs[idx] = nowMs;
+        s_lastHeaterStateOn[idx] = false;
+      }
+      heaterRun(idx, false);
     }
-    heaterRun(idx, false);
     return;
   }
   
@@ -225,7 +229,7 @@ static void maybeEarlyHeaterOff(uint8_t idx, uint32_t /*wetElapsedMs*/) {
     // Only turn ON if we have confidence that temp is FALLING
     bool shouldTurnOn = (g_heaterTrendSamples[idx] >= 2) && !g_heaterTempRising[idx];
     
-    if (shouldTurnOn) {
+    if (shouldTurnOn && !hwHeaterOn) {
       uint32_t nowMs = millis();
       bool shouldLog = (s_lastHeaterStateOn[idx] == false) || (nowMs - s_lastHeaterLogMs[idx] >= 5000);
       if (shouldLog) {
@@ -1484,8 +1488,26 @@ static void setupStateMachines() {
     
     // Check if shoe is already dry - guard with flag to prevent infinite loop
     if (!g_coolingEarlyExit[0]) {
+      static float s_lastCoolingTemp[2] = {NAN, NAN};
+      static float s_lastCoolingDiff[2] = {NAN, NAN};
+
+      float tempCurr = g_dhtTemp[1];
+      bool tempGlitch = false;
+      if (!isnan(tempCurr) && !isnan(s_lastCoolingTemp[0])) {
+        if (tempCurr < s_lastCoolingTemp[0] - 4.0f) {
+          tempGlitch = true;
+        }
+      }
+
       float earlyDiff = g_dhtAHDiff[0];
-      if (earlyDiff <= AH_DRY_THRESHOLD) {
+      bool diffGlitch = false;
+      if (!isnan(earlyDiff) && !isnan(s_lastCoolingDiff[0])) {
+        if (earlyDiff < s_lastCoolingDiff[0] - MAX_AH_DELTA_PER_SAMPLE) {
+          diffGlitch = true;
+        }
+      }
+
+      if (!tempGlitch && !diffGlitch && earlyDiff <= AH_DRY_THRESHOLD) {
         FSM_DBG_PRINT("SUB1: COOLING early dry-check -> already dry (diff=");
         FSM_DBG_PRINT(earlyDiff);
         FSM_DBG_PRINTLN("), advancing immediately");
@@ -1497,6 +1519,9 @@ static void setupStateMachines() {
         fsmSub1.handleEvent(Event::SubStart);
         return;
       }
+
+      if (!isnan(tempCurr)) s_lastCoolingTemp[0] = tempCurr;
+      if (!isnan(earlyDiff)) s_lastCoolingDiff[0] = earlyDiff;
     }
     
     uint32_t nowMs0 = millis();
@@ -1672,8 +1697,27 @@ static void setupStateMachines() {
     
     // Check if shoe is already dry - guard with flag to prevent infinite loop
     if (!g_coolingEarlyExit[1]) {
+      // Glitch guard: ignore implausible sudden temp drops or AH jumps when motor is active
+      static float s_lastCoolingTemp[2] = {NAN, NAN};
+      static float s_lastCoolingDiff[2] = {NAN, NAN};
+
+      float tempCurr = g_dhtTemp[2];
+      bool tempGlitch = false;
+      if (!isnan(tempCurr) && !isnan(s_lastCoolingTemp[1])) {
+        if (tempCurr < s_lastCoolingTemp[1] - 4.0f) {
+          tempGlitch = true; // drop >4C in one sample is likely EMI glitch
+        }
+      }
+
       float earlyDiff = g_dhtAHDiff[1];
-      if (earlyDiff <= AH_DRY_THRESHOLD) {
+      bool diffGlitch = false;
+      if (!isnan(earlyDiff) && !isnan(s_lastCoolingDiff[1])) {
+        if (earlyDiff < s_lastCoolingDiff[1] - MAX_AH_DELTA_PER_SAMPLE) {
+          diffGlitch = true; // sudden downward jump beyond per-sample clamp
+        }
+      }
+
+      if (!tempGlitch && !diffGlitch && earlyDiff <= AH_DRY_THRESHOLD) {
         FSM_DBG_PRINT("SUB2: COOLING early dry-check -> already dry (diff=");
         FSM_DBG_PRINT(earlyDiff);
         FSM_DBG_PRINTLN("), advancing immediately");
@@ -1685,6 +1729,9 @@ static void setupStateMachines() {
         fsmSub2.handleEvent(Event::SubStart);
         return;
       }
+
+      if (!isnan(tempCurr)) s_lastCoolingTemp[1] = tempCurr;
+      if (!isnan(earlyDiff)) s_lastCoolingDiff[1] = earlyDiff;
     }
     
     uint32_t nowMs1 = millis();
