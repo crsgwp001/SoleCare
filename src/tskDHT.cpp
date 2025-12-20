@@ -12,8 +12,22 @@ static DHT dht0(HW_DHT_PIN_0, DHT22);
 static DHT dht1(HW_DHT_PIN_1, DHT22);
 static DHT dht2(HW_DHT_PIN_2, DHT22);
 
-// Protect DHT bitbang timing from other ISRs
-static portMUX_TYPE g_dhtMux = portMUX_INITIALIZER_UNLOCKED;
+// Note: Avoid long critical sections around DHT reads on ESP32.
+// The Adafruit DHT library already manages timing/interrupts; wrapping reads
+// in critical sections can trigger the Interrupt WDT. We instead add brief
+// yields between sensor reads and retry once on failure.
+
+static inline void readDHTSafe(DHT &d, float &t, float &h) {
+  t = d.readTemperature();
+  h = d.readHumidity();
+  if (isnan(t) || isnan(h)) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+    float t2 = d.readTemperature();
+    float h2 = d.readHumidity();
+    if (!isnan(t2)) t = t2;
+    if (!isnan(h2)) h = h2;
+  }
+}
 
 static void vSensorTask(void * /*pvParameters*/) {
   dht0.begin();
@@ -23,30 +37,27 @@ static void vSensorTask(void * /*pvParameters*/) {
   vTaskDelay(pdMS_TO_TICKS(2000));
   while (true) {
     // Sensor 0 (ambient)
-    taskENTER_CRITICAL(&g_dhtMux);
-    float t0 = dht0.readTemperature();
-    float h0 = dht0.readHumidity();
-    taskEXIT_CRITICAL(&g_dhtMux);
+    float t0, h0;
+    readDHTSafe(dht0, t0, h0);
 
     DEV_DBG_PRINT("DHT0 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_0); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t0); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h0);
     g_dhtTemp[0] = t0;
     g_dhtHum[0] = h0;
+    // Yield briefly to feed WDT/IDLE
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     // Sensor 1
-    taskENTER_CRITICAL(&g_dhtMux);
-    float t1 = dht1.readTemperature();
-    float h1 = dht1.readHumidity();
-    taskEXIT_CRITICAL(&g_dhtMux);
+    float t1, h1;
+    readDHTSafe(dht1, t1, h1);
 
     DEV_DBG_PRINT("DHT1 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_1); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t1); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h1);
     g_dhtTemp[1] = t1;
     g_dhtHum[1] = h1;
+    vTaskDelay(pdMS_TO_TICKS(1));
 
     // Sensor 2
-    taskENTER_CRITICAL(&g_dhtMux);
-    float t2 = dht2.readTemperature();
-    float h2 = dht2.readHumidity();
-    taskEXIT_CRITICAL(&g_dhtMux);
+    float t2, h2;
+    readDHTSafe(dht2, t2, h2);
 
     DEV_DBG_PRINT("DHT2 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_2); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t2); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h2);
     g_dhtTemp[2] = t2;
@@ -59,6 +70,13 @@ static void vSensorTask(void * /*pvParameters*/) {
         // Apply offset to ambient sensor (sensor 0)
         if (i == 0) {
           ah += AMB_AH_OFFSET;
+        }
+        // Clamp unrealistic per-sample jumps to protect against EMI/glitches
+        float prev = g_dhtAH[i];
+        if (!isnan(prev) && prev != 0.0f) {
+          float delta = ah - prev;
+          if (delta > MAX_AH_DELTA_PER_SAMPLE) ah = prev + MAX_AH_DELTA_PER_SAMPLE;
+          else if (delta < -MAX_AH_DELTA_PER_SAMPLE) ah = prev - MAX_AH_DELTA_PER_SAMPLE;
         }
         g_dhtAH[i] = ah;
         g_dhtAH_ema[i] = ah;
@@ -90,6 +108,6 @@ static void vSensorTask(void * /*pvParameters*/) {
 }
 
 void createSensorTask() {
-  // Run on core 0 with slightly higher priority to minimize jitter during DHT bitbang
-  xTaskCreatePinnedToCore(vSensorTask, "SensorTask", 4096, nullptr, 2, nullptr, 0);
+  // Pin to core 1 to reduce contention with WiFi/IDLE on core 0 and avoid WDT
+  xTaskCreatePinnedToCore(vSensorTask, "SensorTask", 4096, nullptr, 2, nullptr, 1);
 }
