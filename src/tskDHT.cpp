@@ -75,9 +75,12 @@ static void vSensorTask(void * /*pvParameters*/) {
         g_dhtAHDiff_ema[i - 1] = diff;
         g_dhtIsWet[i - 1] = (diff > AH_WET_THRESHOLD);
       } else {
-        g_dhtAHDiff[i - 1] = 0.0f;
-        g_dhtAHDiff_ema[i - 1] = 0.0f;
-        g_dhtIsWet[i - 1] = false;
+        // Invalid reading from ambient or shoe sensor; do not force DRY.
+        // Preserve last valid wet/dry state and mark diffs as NAN so
+        // downstream checks ignore this cycle.
+        g_dhtAHDiff[i - 1] = NAN;
+        g_dhtAHDiff_ema[i - 1] = NAN;
+        // Intentionally leave g_dhtIsWet[i - 1] unchanged
       }
     }
 
