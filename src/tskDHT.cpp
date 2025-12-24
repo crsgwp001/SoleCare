@@ -50,6 +50,8 @@ static void vSensorTask(void * /*pvParameters*/) {
       g_dhtTemp[0] = t0;
       g_dhtHum[0] = h0;
       s_hasValid[0] = true;
+    } else {
+      g_dhtNaNCount[0]++;
     }
     // Yield briefly to feed WDT/IDLE
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -63,6 +65,8 @@ static void vSensorTask(void * /*pvParameters*/) {
       g_dhtTemp[1] = t1;
       g_dhtHum[1] = h1;
       s_hasValid[1] = true;
+    } else {
+      g_dhtNaNCount[1]++;
     }
     vTaskDelay(pdMS_TO_TICKS(1));
 
@@ -75,6 +79,8 @@ static void vSensorTask(void * /*pvParameters*/) {
       g_dhtTemp[2] = t2;
       g_dhtHum[2] = h2;
       s_hasValid[2] = true;
+    } else {
+      g_dhtNaNCount[2]++;
     }
 
     // Compute AH and simple wet flags (no EMA/no filtering)

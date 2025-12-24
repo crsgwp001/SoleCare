@@ -23,6 +23,12 @@ constexpr uint32_t WET_MODERATE_MS = 360u * 1000u;           // Moderate (1.5-3.
 constexpr uint32_t WET_VERY_WET_MS = 480u * 1000u;           // Very wet (3.5-5.0): 8 minutes
 constexpr uint32_t WET_SOAKED_MS = 600u * 1000u;             // Soaked (5.0+): 10 minutes
 
+// WET phase maximum durations (safety limits to prevent indefinite heating)
+constexpr uint32_t WET_BARELY_WET_MAX_MS = 300u * 1000u;      // 5 min max
+constexpr uint32_t WET_MODERATE_MAX_MS = 540u * 1000u;        // 9 min max
+constexpr uint32_t WET_VERY_WET_MAX_MS = 720u * 1000u;        // 12 min max
+constexpr uint32_t WET_SOAKED_MAX_MS = 900u * 1000u;          // 15 min max
+
 // Corresponding post-peak buffer durations
 constexpr uint32_t WET_BUFFER_BARELY_WET_MS = 40u * 1000u;   // 40 seconds for barely wet
 constexpr uint32_t WET_BUFFER_MODERATE_MS = 75u * 1000u;     // 75 seconds for moderate
@@ -45,6 +51,7 @@ constexpr uint32_t HEATER_WARMUP_MOTOR_DUTY = 65u;  // Motor duty during heater-
 constexpr float COOLING_TEMP_FAN_BOOST_ON = 38.5f;      // If shoe temp >= this, boost fan during COOLING
 constexpr float COOLING_TEMP_RELEASE_C = 37.0f;         // Do not end COOLING motor phase until temp <= this
 constexpr uint32_t COOLING_TEMP_EXTEND_MAX_MS = 120u * 1000u; // Cap extra motor run for temperature hold
+constexpr uint32_t COOLING_MOTOR_ABSOLUTE_MAX_MS = 240u * 1000u; // Hard timeout to prevent watchdog reset (4 min)
 // Ambient-coupled cooling target
 constexpr float COOLING_AMBIENT_DELTA_C = 0.5f;              // Aim to cool to ambient + 0.5C
 constexpr int COOLING_FAN_MIN_DUTY = 40;                     // Minimum fan duty during COOLING (low speed for passive cooling, avoid friction heating)
@@ -52,6 +59,7 @@ constexpr int COOLING_FAN_MAX_DUTY = 55;                     // Maximum fan duty
 // Re-evap short cycle (Option A)
 constexpr uint32_t RE_EVAP_MAX_MS = 60u * 1000u;             // Max re-evap duration (heater+motor)
 constexpr int RE_EVAP_MOTOR_DUTY = 85;                       // Motor duty during re-evap
+constexpr int MAX_RE_EVAP_RETRIES = 2;                       // Prevent infinite re-evap loops
 constexpr float RE_EVAP_RISE_BARE_MOD = 0.6f;                // Rise-from-min threshold (barely/moderate)
 constexpr float RE_EVAP_RISE_VERY = 0.8f;                    // Rise threshold (very wet)
 constexpr float RE_EVAP_RISE_SOAKED = 1.0f;                  // Rise threshold (soaked)
@@ -145,9 +153,17 @@ constexpr bool HW_RELAY_ACTIVE_LOW = false;
 constexpr bool HW_ACTUATOR_ACTIVE_LOW = false;
 
 // ==================== BATTERY MONITORING ====================
+// Designed resistor divider: (33k + 10k) / 10k = 4.3
+// Calibration: measured 2.7V on pin 39 with 11.74V input
+// Required BATTERY_VFS to read 2.7V from raw ADC 3152
 constexpr float BATTERY_R1 = 33000.0f;
 constexpr float BATTERY_R2 = 10000.0f;
-constexpr float BATTERY_VFS = 3.28f;
+// Recalibrated: under load reads were low (e.g., 10.5V → 10.0V, 11.7V → 11.5V)
+// Increase VFS ~3% to raise reported voltage under load
+constexpr float BATTERY_VFS = 3.530f;  // Adjusted upward to reduce under-read under load
+// Fixed additive offset to correct consistent bias across range
+// Negative value means reported voltage will be reduced to match real
+constexpr float BATTERY_OFFSET_V = -0.20f;  // Subtract 0.20V from all battery readings
 constexpr float BATTERY_LOW_THRESHOLD = 10.0f;
 constexpr float BATTERY_RECOVERY_THRESHOLD = 10.8f;
 constexpr int BATTERY_ADC_SAMPLES = 32;
