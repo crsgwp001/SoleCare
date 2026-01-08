@@ -20,6 +20,9 @@ volatile bool g_dhtIsWet[2] = {false, false};
 // AH rate-of-change in g/m³/min for sensors 1 and 2
 float g_dhtAHRate[2] = {0.0f, 0.0f};
 
+// NaN counters per DHT sensor
+volatile uint32_t g_dhtNaNCount[3] = {0, 0, 0};
+
 // Cached battery voltage
 volatile float g_lastBatteryVoltage = 0.0f;
 
@@ -34,6 +37,11 @@ float readBatteryVoltage() {
   
   float vAdc = (raw / 4095.0f) * BATTERY_VFS;
   float vBat = vAdc * (BATTERY_R1 + BATTERY_R2) / BATTERY_R2;
+  // Apply fixed offset to address consistent under-read under load
+  vBat += BATTERY_OFFSET_V;
+  
+  // Battery debug disabled
+  
   return vBat;
 }
 

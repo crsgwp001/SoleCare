@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cmath>
 #include "config.h"
+#include "global.h"
 
 // State name lookup
 static const char* getSubStateName(SubState s) {
@@ -28,7 +29,7 @@ static const char* getWetDryStatus(float ahDiff) {
 
 void pidLogInit() {
   // Print header for CSV logging (every 2s)
-  Serial.println("time_ms,ah0,ah1,ah2,s0_temp,s1_temp,s0_diff,s0_wet,s0_state,s0_rate,s0_pid,s0_sp,s1_diff,s1_wet,s1_state,s1_rate,s1_pid,s1_sp");
+  Serial.println("time_ms,ah0,ah1,ah2,s0_temp,s1_temp,s0_diff,s0_wet,s0_state,s0_rate,s0_pid,s0_sp,s1_diff,s1_wet,s1_state,s1_rate,s1_pid,s1_sp,nan0,nan1,nan2");
 }
 
 void pidLogData(float ah0, float ah1, float ah2,
@@ -42,12 +43,13 @@ void pidLogData(float ah0, float ah1, float ah2,
   float s1Temp = std::isnan(shoe1Temp) ? 0.0f : shoe1Temp;
   
   // CSV format: timestamp, 3 AH sensors, shoe0 (diff, wet/dry, state, rate, pid), shoe1 (diff, wet/dry, state, rate, pid)
-  Serial.printf("%lu,%.3f,%.3f,%.3f,%.2f,%.2f,%.3f,%s,%s,%.4f,%.3f,%.3f,%.3f,%s,%s,%.4f,%.3f,%.3f\n",
+  Serial.printf("%lu,%.3f,%.3f,%.3f,%.2f,%.2f,%.3f,%s,%s,%.4f,%.3f,%.3f,%.3f,%s,%s,%.4f,%.3f,%.3f,%lu,%lu,%lu\n",
                 millis(),
                 ah0, ah1, ah2,
                 s0Temp, s1Temp,
                 s0Diff, getWetDryStatus(shoe0AHDiff), getSubStateName(shoe0State), shoe0AHRate, shoe0PIDOut, shoe0Setpoint,
-                s1Diff, getWetDryStatus(shoe1AHDiff), getSubStateName(shoe1State), shoe1AHRate, shoe1PIDOut, shoe1Setpoint);
+                s1Diff, getWetDryStatus(shoe1AHDiff), getSubStateName(shoe1State), shoe1AHRate, shoe1PIDOut, shoe1Setpoint,
+                (unsigned long)g_dhtNaNCount[0], (unsigned long)g_dhtNaNCount[1], (unsigned long)g_dhtNaNCount[2]);
 }
 
 #endif

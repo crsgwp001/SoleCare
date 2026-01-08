@@ -96,6 +96,19 @@
 				"run"
 			],
 			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build (explicit exe)",
+			"type": "shell",
+			"command": "C:\\Users\\Admin\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
 		}
 	]
 }
