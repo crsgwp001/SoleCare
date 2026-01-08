@@ -1574,6 +1574,10 @@ static void setupStateMachines() {
     if (g_subCoolingStartMs[0] == 0)
       return;
 
+    // Prevent repeated hard-timeout logging; once triggered, skip motor phase and go straight to stabilization
+    static bool s_hardTimeout[2] = {false, false};
+    bool skipMotorPhase = s_hardTimeout[0] && (g_subCoolingStabilizeStartMs[0] != 0);
+
     // PERSISTENT HEATER OFF GUARD: Ensure heater stays OFF during main COOLING phase
     // (only RE-EVAP subsection is allowed to control heater)
     if (!g_inReEvap[0]) {
@@ -1702,78 +1706,81 @@ static void setupStateMachines() {
     float ambC0 = g_dhtTemp[0];
     float targetC0 = (!isnan(ambC0) ? (ambC0 + COOLING_AMBIENT_DELTA_C) : COOLING_TEMP_RELEASE_C);
     
-    // Phase 1: motor running with duty based on temperature delta (shoe vs ambient)
-    // Goal: Use motor to cool when shoe is HOT; OFF when ambient is warmer (passive cooling/heating sufficient)
-    // Heater is already OFF; motor circulation is the ONLY cooling mechanism
-    if (!isnan(tempC0) && !isnan(ambC0)) {
-      float delta = tempC0 - ambC0;  // Positive = shoe hotter, negative = ambient hotter
-      int duty = 0;  // Default: motor OFF
-      
-      if (delta > 5.0f) {
-        // Shoe much hotter than ambient: aggressive motor cooling needed
-        duty = 90;  // Increased to speed cooling
-      } else if (delta > 2.0f) {
-        // Shoe moderately hotter: medium-high motor speed
-        duty = 75;  // Increased from 60
-      } else if (delta > 0.5f) {
-        // Shoe slightly hotter: ensure meaningful airflow
-        duty = 55;  // Increased from 40
-      }
-      // If delta <= 0.5: ambient is at least as warm as shoe, motor OFF (duty = 0)
-      
-      motorSetDutyPercent(0, duty);
-    } else if (!isnan(tempC0) && tempC0 >= COOLING_TEMP_FAN_BOOST_ON) {
-      // Fallback: high shoe temp detected, use moderate cooling (60%)
-      motorSetDutyPercent(0, 60);
-    } else {
-      // Safety: if can't determine temperature reliably, use low motor (40%)
-      motorSetDutyPercent(0, 40);
-    }
-    if (motorElapsed < g_coolingMotorDurationMs[0]) {
-      return; // Still in motor-run phase
-    }
-    
-    // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded to prevent watchdog timeout)
-    if (!isnan(tempC0) && tempC0 > targetC0) {
-      // Hard timeout check: prevent indefinite motor running that could cause watchdog reset
-      if (motorElapsed >= COOLING_MOTOR_ABSOLUTE_MAX_MS) {
-        FSM_DBG_PRINT("SUB1: COOLING -> hard motor timeout (");
-        FSM_DBG_PRINT(motorElapsed);
-        FSM_DBG_PRINTLN("ms) reached, forcing stabilization");
-        // Force transition to stabilization immediately
-        motorStop(0);
-        if (g_wetLockOwner == 0) {
-          g_wetLockOwner = -1;
-          FSM_DBG_PRINTLN("SUB1: COOLING released motor lock on hard timeout");
-        }
-        g_subCoolingStabilizeStartMs[0] = millis();
-        return;
-      }
-      if (motorElapsed < g_coolingMotorDurationMs[0] + COOLING_TEMP_EXTEND_MAX_MS) {
-        static uint32_t lastHoldLog0 = 0;
-        if ((uint32_t)(nowMs0 - lastHoldLog0) >= 10000u || lastHoldLog0 == 0) {
-          lastHoldLog0 = nowMs0;
-          FSM_DBG_PRINT("SUB1: COOLING hold - temp=");
-          FSM_DBG_PRINT(tempC0, 1);
-          FSM_DBG_PRINT("C, target=");
-          FSM_DBG_PRINT(targetC0, 1);
-          FSM_DBG_PRINTLN("C, extending motor run");
-        }
-        // Adjust motor duty based on current temp delta during extension
-        float delta = tempC0 - ambC0;
+    if (!skipMotorPhase) {
+      // Phase 1: motor running with duty based on temperature delta (shoe vs ambient)
+      // Goal: Use motor to cool when shoe is HOT; OFF when ambient is warmer (passive cooling/heating sufficient)
+      // Heater is already OFF; motor circulation is the ONLY cooling mechanism
+      if (!isnan(tempC0) && !isnan(ambC0)) {
+        float delta = tempC0 - ambC0;  // Positive = shoe hotter, negative = ambient hotter
+        int duty = 0;  // Default: motor OFF
+        
         if (delta > 5.0f) {
-          motorSetDutyPercent(0, 80);  // Still hot, use high duty
+          // Shoe much hotter than ambient: aggressive motor cooling needed
+          duty = 90;  // Increased to speed cooling
         } else if (delta > 2.0f) {
-          motorSetDutyPercent(0, 60);  // Moderately hot
-        } else {
-          motorSetDutyPercent(0, 40);  // Just barely above target
+          // Shoe moderately hotter: medium-high motor speed
+          duty = 75;  // Increased from 60
+        } else if (delta > 0.5f) {
+          // Shoe slightly hotter: ensure meaningful airflow
+          duty = 55;  // Increased from 40
         }
-        return;
+        // If delta <= 0.5: ambient is at least as warm as shoe, motor OFF (duty = 0)
+        
+        motorSetDutyPercent(0, duty);
+      } else if (!isnan(tempC0) && tempC0 >= COOLING_TEMP_FAN_BOOST_ON) {
+        // Fallback: high shoe temp detected, use moderate cooling (60%)
+        motorSetDutyPercent(0, 60);
+      } else {
+        // Safety: if can't determine temperature reliably, use low motor (40%)
+        motorSetDutyPercent(0, 40);
       }
-      // Max extension reached: force stabilization to prevent infinite watchdog timeout
-      FSM_DBG_PRINT("SUB1: COOLING -> max motor extension (");
-      FSM_DBG_PRINT(motorElapsed);
-      FSM_DBG_PRINTLN("ms) reached, forcing stabilization to prevent watchdog");
+      if (motorElapsed < g_coolingMotorDurationMs[0]) {
+        return; // Still in motor-run phase
+      }
+      
+      // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded to prevent watchdog timeout)
+      if (!isnan(tempC0) && tempC0 > targetC0) {
+        // Hard timeout check: prevent indefinite motor running that could cause watchdog reset
+        if (motorElapsed >= COOLING_MOTOR_ABSOLUTE_MAX_MS) {
+          FSM_DBG_PRINT("SUB1: COOLING -> hard motor timeout (");
+          FSM_DBG_PRINT(motorElapsed);
+          FSM_DBG_PRINTLN("ms) reached, forcing stabilization");
+          // Force transition to stabilization immediately but keep motor at low duty for airflow
+          motorSetDutyPercent(0, 60);
+          if (g_wetLockOwner == 0) {
+            g_wetLockOwner = -1;
+            FSM_DBG_PRINTLN("SUB1: COOLING released motor lock on hard timeout");
+          }
+          g_subCoolingStabilizeStartMs[0] = millis();
+          s_hardTimeout[0] = true;
+          return;
+        }
+        if (motorElapsed < g_coolingMotorDurationMs[0] + COOLING_TEMP_EXTEND_MAX_MS) {
+          static uint32_t lastHoldLog0 = 0;
+          if ((uint32_t)(nowMs0 - lastHoldLog0) >= 10000u || lastHoldLog0 == 0) {
+            lastHoldLog0 = nowMs0;
+            FSM_DBG_PRINT("SUB1: COOLING hold - temp=");
+            FSM_DBG_PRINT(tempC0, 1);
+            FSM_DBG_PRINT("C, target=");
+            FSM_DBG_PRINT(targetC0, 1);
+            FSM_DBG_PRINTLN("C, extending motor run");
+          }
+          // Adjust motor duty based on current temp delta during extension
+          float delta = tempC0 - ambC0;
+          if (delta > 5.0f) {
+            motorSetDutyPercent(0, 80);  // Still hot, use high duty
+          } else if (delta > 2.0f) {
+            motorSetDutyPercent(0, 60);  // Moderately hot
+          } else {
+            motorSetDutyPercent(0, 40);  // Just barely above target
+          }
+          return;
+        }
+        // Max extension reached: force stabilization to prevent infinite watchdog timeout
+        FSM_DBG_PRINT("SUB1: COOLING -> max motor extension (");
+        FSM_DBG_PRINT(motorElapsed);
+        FSM_DBG_PRINTLN("ms) reached, forcing stabilization to prevent watchdog");
+      }
     }
     
     // Transition from motor phase to stabilization phase
@@ -1840,6 +1847,7 @@ static void setupStateMachines() {
     g_subCoolingStartMs[0] = 0;
     g_subCoolingStabilizeStartMs[0] = 0;
     g_coolingLocked[0] = false;
+    s_hardTimeout[0] = false;
     if (stillWet) {
       // Immediately perform short re-evap cycle (no cooling retries)
       FSM_DBG_PRINTLN("SUB1: COOLING -> invoking RE-EVAP short cycle");
@@ -1857,6 +1865,10 @@ static void setupStateMachines() {
   fsmSub2.setRun(SubState::S_COOLING, []() {
     if (g_subCoolingStartMs[1] == 0)
       return;
+
+    // Prevent repeated hard-timeout logging; once triggered, skip motor phase and go straight to stabilization
+    static bool s_hardTimeout[2] = {false, false};
+    bool skipMotorPhase = s_hardTimeout[1] && (g_subCoolingStabilizeStartMs[1] != 0);
 
     // PERSISTENT HEATER OFF GUARD: Ensure heater stays OFF during main COOLING phase
     // (only RE-EVAP subsection is allowed to control heater)
@@ -1985,78 +1997,81 @@ static void setupStateMachines() {
     float ambC1 = g_dhtTemp[0];
     float targetC1 = (!isnan(ambC1) ? (ambC1 + COOLING_AMBIENT_DELTA_C) : COOLING_TEMP_RELEASE_C);
     
-    // Phase 1: motor running with duty based on temperature delta (shoe vs ambient)
-    // Goal: Use motor to cool when shoe is HOT; OFF when ambient is warmer (passive cooling/heating sufficient)
-    // Heater is already OFF; motor circulation is the ONLY cooling mechanism
-    if (!isnan(tempC1) && !isnan(ambC1)) {
-      float delta = tempC1 - ambC1;  // Positive = shoe hotter, negative = ambient hotter
-      int duty = 0;  // Default: motor OFF
-      
-      if (delta > 5.0f) {
-        // Shoe much hotter than ambient: aggressive motor cooling needed
-        duty = 90;  // Increased to speed cooling
-      } else if (delta > 2.0f) {
-        // Shoe moderately hotter: medium-high motor speed
-        duty = 75;  // Increased from 60
-      } else if (delta > 0.5f) {
-        // Shoe slightly hotter: ensure meaningful airflow
-        duty = 55;  // Increased from 40
-      }
-      // If delta <= 0.5: ambient is at least as warm as shoe, motor OFF (duty = 0)
-      
-      motorSetDutyPercent(1, duty);
-    } else if (!isnan(tempC1) && tempC1 >= COOLING_TEMP_FAN_BOOST_ON) {
-      // Fallback: high shoe temp detected, use moderate cooling (60%)
-      motorSetDutyPercent(1, 60);
-    } else {
-      // Safety: if can't determine temperature reliably, use low motor (40%)
-      motorSetDutyPercent(1, 40);
-    }
-    if (motorElapsed < g_coolingMotorDurationMs[1]) {
-      return; // Still in motor-run phase
-    }
-    
-    // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded to prevent watchdog timeout)
-    if (!isnan(tempC1) && tempC1 > targetC1) {
-      // Hard timeout check: prevent indefinite motor running that could cause watchdog reset
-      if (motorElapsed >= COOLING_MOTOR_ABSOLUTE_MAX_MS) {
-        FSM_DBG_PRINT("SUB2: COOLING -> hard motor timeout (");
-        FSM_DBG_PRINT(motorElapsed);
-        FSM_DBG_PRINTLN("ms) reached, forcing stabilization");
-        // Force transition to stabilization immediately
-        motorStop(1);
-        if (g_wetLockOwner == 1) {
-          g_wetLockOwner = -1;
-          FSM_DBG_PRINTLN("SUB2: COOLING released motor lock on hard timeout");
-        }
-        g_subCoolingStabilizeStartMs[1] = millis();
-        return;
-      }
-      if (motorElapsed < g_coolingMotorDurationMs[1] + COOLING_TEMP_EXTEND_MAX_MS) {
-        static uint32_t lastHoldLog1 = 0;
-        if ((uint32_t)(nowMs1 - lastHoldLog1) >= 10000u || lastHoldLog1 == 0) {
-          lastHoldLog1 = nowMs1;
-          FSM_DBG_PRINT("SUB2: COOLING hold - temp=");
-          FSM_DBG_PRINT(tempC1, 1);
-          FSM_DBG_PRINT("C, target=");
-          FSM_DBG_PRINT(targetC1, 1);
-          FSM_DBG_PRINTLN("C, extending motor run");
-        }
-        // Adjust motor duty based on current temp delta during extension
-        float delta = tempC1 - ambC1;
+    if (!skipMotorPhase) {
+      // Phase 1: motor running with duty based on temperature delta (shoe vs ambient)
+      // Goal: Use motor to cool when shoe is HOT; OFF when ambient is warmer (passive cooling/heating sufficient)
+      // Heater is already OFF; motor circulation is the ONLY cooling mechanism
+      if (!isnan(tempC1) && !isnan(ambC1)) {
+        float delta = tempC1 - ambC1;  // Positive = shoe hotter, negative = ambient hotter
+        int duty = 0;  // Default: motor OFF
+        
         if (delta > 5.0f) {
-          motorSetDutyPercent(1, 80);  // Still hot, use high duty
+          // Shoe much hotter than ambient: aggressive motor cooling needed
+          duty = 90;  // Increased to speed cooling
         } else if (delta > 2.0f) {
-          motorSetDutyPercent(1, 60);  // Moderately hot
-        } else {
-          motorSetDutyPercent(1, 40);  // Just barely above target
+          // Shoe moderately hotter: medium-high motor speed
+          duty = 75;  // Increased from 60
+        } else if (delta > 0.5f) {
+          // Shoe slightly hotter: ensure meaningful airflow
+          duty = 55;  // Increased from 40
         }
-        return;
+        // If delta <= 0.5: ambient is at least as warm as shoe, motor OFF (duty = 0)
+        
+        motorSetDutyPercent(1, duty);
+      } else if (!isnan(tempC1) && tempC1 >= COOLING_TEMP_FAN_BOOST_ON) {
+        // Fallback: high shoe temp detected, use moderate cooling (60%)
+        motorSetDutyPercent(1, 60);
+      } else {
+        // Safety: if can't determine temperature reliably, use low motor (40%)
+        motorSetDutyPercent(1, 40);
       }
-      // Max extension reached: force stabilization to prevent infinite watchdog timeout
-      FSM_DBG_PRINT("SUB2: COOLING -> max motor extension (");
-      FSM_DBG_PRINT(motorElapsed);
-      FSM_DBG_PRINTLN("ms) reached, forcing stabilization to prevent watchdog");
+      if (motorElapsed < g_coolingMotorDurationMs[1]) {
+        return; // Still in motor-run phase
+      }
+      
+      // If motor phase time elapsed but shoe is still hot, extend motor phase (bounded to prevent watchdog timeout)
+      if (!isnan(tempC1) && tempC1 > targetC1) {
+        // Hard timeout check: prevent indefinite motor running that could cause watchdog reset
+        if (motorElapsed >= COOLING_MOTOR_ABSOLUTE_MAX_MS) {
+          FSM_DBG_PRINT("SUB2: COOLING -> hard motor timeout (");
+          FSM_DBG_PRINT(motorElapsed);
+          FSM_DBG_PRINTLN("ms) reached, forcing stabilization");
+          // Force transition to stabilization immediately but keep motor at low duty for airflow
+          motorSetDutyPercent(1, 60);
+          if (g_wetLockOwner == 1) {
+            g_wetLockOwner = -1;
+            FSM_DBG_PRINTLN("SUB2: COOLING released motor lock on hard timeout");
+          }
+          g_subCoolingStabilizeStartMs[1] = millis();
+          s_hardTimeout[1] = true;
+          return;
+        }
+        if (motorElapsed < g_coolingMotorDurationMs[1] + COOLING_TEMP_EXTEND_MAX_MS) {
+          static uint32_t lastHoldLog1 = 0;
+          if ((uint32_t)(nowMs1 - lastHoldLog1) >= 10000u || lastHoldLog1 == 0) {
+            lastHoldLog1 = nowMs1;
+            FSM_DBG_PRINT("SUB2: COOLING hold - temp=");
+            FSM_DBG_PRINT(tempC1, 1);
+            FSM_DBG_PRINT("C, target=");
+            FSM_DBG_PRINT(targetC1, 1);
+            FSM_DBG_PRINTLN("C, extending motor run");
+          }
+          // Adjust motor duty based on current temp delta during extension
+          float delta = tempC1 - ambC1;
+          if (delta > 5.0f) {
+            motorSetDutyPercent(1, 80);  // Still hot, use high duty
+          } else if (delta > 2.0f) {
+            motorSetDutyPercent(1, 60);  // Moderately hot
+          } else {
+            motorSetDutyPercent(1, 40);  // Just barely above target
+          }
+          return;
+        }
+        // Max extension reached: force stabilization to prevent infinite watchdog timeout
+        FSM_DBG_PRINT("SUB2: COOLING -> max motor extension (");
+        FSM_DBG_PRINT(motorElapsed);
+        FSM_DBG_PRINTLN("ms) reached, forcing stabilization to prevent watchdog");
+      }
     }
     
     // Transition from motor phase to stabilization phase
@@ -2122,6 +2137,7 @@ static void setupStateMachines() {
     g_subCoolingStartMs[1] = 0;
     g_subCoolingStabilizeStartMs[1] = 0;
     g_coolingLocked[1] = false;
+    s_hardTimeout[1] = false;
     if (stillWet) {
       // Immediately perform short re-evap cycle (no cooling retries)
       FSM_DBG_PRINTLN("SUB2: COOLING -> invoking RE-EVAP short cycle");
@@ -2405,13 +2421,13 @@ static void vStateMachineTask(void * /*pvParameters*/) {
         }
       }
     }
-    // Auto-reset: if we entered Done, after DONE_TIMEOUT_MS reset to Idle (global only, not subs)
+    // Auto-reset: if we entered Done, after DONE_TIMEOUT_MS reset everything back to Idle
     if (g_doneStartMs != 0) {
       uint32_t now = millis();
       if ((uint32_t)(now - g_doneStartMs) >= DONE_TIMEOUT_MS) {
-        FSM_DBG_PRINTLN("GLOBAL: Done timeout -> Reset to Idle (global only)");
-        // Post ResetPressed with broadcastAll=false to only reset global FSM
-        fsmPostEvent(Event::ResetPressed, /*broadcastAll=*/false);
+        FSM_DBG_PRINTLN("GLOBAL: Done timeout -> Reset to Idle (global+subs)");
+        // Post ResetPressed to all FSMs so subs leave DONE and return to S_IDLE
+        fsmPostEvent(Event::ResetPressed, /*broadcastAll=*/true);
         g_doneStartMs = 0;
       }
     }

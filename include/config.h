@@ -8,6 +8,11 @@ constexpr float AH_DRY_THRESHOLD_LENIENT = 1.0f;  // Lenient threshold when AH d
 constexpr float EMA_ALPHA = 0.2f;
 constexpr float AMB_AH_OFFSET = 0.7f;
 
+// DHT sanity guards: discard implausible temperatures or sudden jumps to avoid bogus AH
+constexpr float DHT_TEMP_MIN_C = -20.0f;
+constexpr float DHT_TEMP_MAX_C = 80.0f;
+constexpr float DHT_TEMP_MAX_STEP_C = 8.0f;  // per sample (3s)
+
 // EMI Protection: Maximum allowed AH change per sample (g/m³)
 // Normal changes are < 0.5 g/m³/sample; anything larger is likely EMI noise
 constexpr float MAX_AH_DELTA_PER_SAMPLE = 2.0f;
@@ -163,7 +168,7 @@ constexpr float BATTERY_R2 = 10000.0f;
 constexpr float BATTERY_VFS = 3.530f;  // Adjusted upward to reduce under-read under load
 // Fixed additive offset to correct consistent bias across range
 // Negative value means reported voltage will be reduced to match real
-constexpr float BATTERY_OFFSET_V = -0.20f;  // Subtract 0.20V from all battery readings
+constexpr float BATTERY_OFFSET_V = 0.0f;  // No fixed offset applied
 constexpr float BATTERY_LOW_THRESHOLD = 10.0f;
 constexpr float BATTERY_RECOVERY_THRESHOLD = 10.8f;
 constexpr int BATTERY_ADC_SAMPLES = 32;

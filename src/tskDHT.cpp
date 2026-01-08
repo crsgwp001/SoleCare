@@ -8,6 +8,19 @@
 #include <Adafruit_Sensor.h>
 #include <cstring>
 
+// Reject implausible spikes to avoid corrupt temps (e.g., -1645C bursts)
+static bool sanitizeDHTSample(int idx, float &t, float &h, bool hasPrev) {
+  if (isnan(t) || isnan(h)) return false;
+  if (h < 0.0f) h = 0.0f;
+  if (h > 100.0f) h = 100.0f;
+  if (t < DHT_TEMP_MIN_C || t > DHT_TEMP_MAX_C) return false;
+  if (hasPrev) {
+    float prev = g_dhtTemp[idx];
+    if (!isnan(prev) && fabsf(t - prev) > DHT_TEMP_MAX_STEP_C) return false;
+  }
+  return true;
+}
+
 // Use Adafruit DHT directly (wrapper removed to reduce timing overhead)
 static DHT dht0(HW_DHT_PIN_0, DHT22);
 static DHT dht1(HW_DHT_PIN_1, DHT22);
@@ -44,9 +57,10 @@ static void vSensorTask(void * /*pvParameters*/) {
     // Sensor 0 (ambient)
     float t0, h0;
     readDHTSafe(dht0, t0, h0);
+    bool ok0 = sanitizeDHTSample(0, t0, h0, s_hasValid[0]);
 
     DEV_DBG_PRINT("DHT0 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_0); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t0); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h0);
-    if (!isnan(t0) && !isnan(h0)) {
+    if (ok0) {
       g_dhtTemp[0] = t0;
       g_dhtHum[0] = h0;
       s_hasValid[0] = true;
@@ -59,9 +73,10 @@ static void vSensorTask(void * /*pvParameters*/) {
     // Sensor 1
     float t1, h1;
     readDHTSafe(dht1, t1, h1);
+    bool ok1 = sanitizeDHTSample(1, t1, h1, s_hasValid[1]);
 
     DEV_DBG_PRINT("DHT1 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_1); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t1); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h1);
-    if (!isnan(t1) && !isnan(h1)) {
+    if (ok1) {
       g_dhtTemp[1] = t1;
       g_dhtHum[1] = h1;
       s_hasValid[1] = true;
@@ -73,9 +88,10 @@ static void vSensorTask(void * /*pvParameters*/) {
     // Sensor 2
     float t2, h2;
     readDHTSafe(dht2, t2, h2);
+    bool ok2 = sanitizeDHTSample(2, t2, h2, s_hasValid[2]);
 
     DEV_DBG_PRINT("DHT2 GPIO"); DEV_DBG_PRINT(HW_DHT_PIN_2); DEV_DBG_PRINT(" -> T="); DEV_DBG_PRINT(t2); DEV_DBG_PRINT(" H="); DEV_DBG_PRINTLN(h2);
-    if (!isnan(t2) && !isnan(h2)) {
+    if (ok2) {
       g_dhtTemp[2] = t2;
       g_dhtHum[2] = h2;
       s_hasValid[2] = true;
